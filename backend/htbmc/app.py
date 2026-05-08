@@ -8,9 +8,32 @@ from typing import Any
 from urllib import error, request
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 app = FastAPI(title="HTB Mission Control", version="0.2.0")
+
+
+def _parse_cors_origins(value: str | None) -> list[str]:
+    if not value:
+        return [
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
+            "http://127.0.0.1:8000",
+            "http://localhost:8000",
+        ]
+    origins = [origin.strip() for origin in value.split(",")]
+    return [origin for origin in origins if origin]
+
+
+allowed_origins = _parse_cors_origins(os.getenv("HTBMC_CORS_ORIGINS"))
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 LOG_DIR = Path(os.getenv("HTBMC_LOG_DIR", "logs"))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
