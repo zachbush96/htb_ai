@@ -42,6 +42,12 @@ ACTION_TIMEOUT_SECONDS = int(os.getenv("HTBMC_ACTION_TIMEOUT_SECONDS", "180"))
 OLLAMA_TAILSCALE_HOST = os.getenv("OLLAMA_TAILSCALE_HOST", "").strip()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "").strip()
 OLLAMA_TIMEOUT_SECONDS = float(os.getenv("HTBMC_OLLAMA_TIMEOUT_SECONDS", "5"))
+PLANNER_INTERVAL_SECONDS = float(os.getenv("HTBMC_PLANNER_INTERVAL_SECONDS", "20"))
+PLANNER_MAX_PENDING_ACTIONS = int(os.getenv("HTBMC_PLANNER_MAX_PENDING_ACTIONS", "6"))
+PLANNER_GLOBAL_RPM = max(1, int(os.getenv("HTBMC_PLANNER_GLOBAL_RPM", "30")))
+PLANNER_INFLIGHT_LIMIT = max(1, int(os.getenv("HTBMC_PLANNER_INFLIGHT_LIMIT", "2")))
+PLANNER_TARGET_COOLDOWN_SECONDS = max(0.0, float(os.getenv("HTBMC_PLANNER_TARGET_COOLDOWN_SECONDS", "5")))
+PLANNER_MAX_UNRESOLVED_ACTIONS = max(1, int(os.getenv("HTBMC_PLANNER_MAX_UNRESOLVED_ACTIONS", "8")))
 LLM_PROMPTS_LOG_PATH = STATE_DIR / "logs" / "llm_prompts.jsonl"
 
 STATE_LOCK = threading.Lock()
@@ -51,6 +57,25 @@ EXECUTION_RUNTIME: dict[str, dict[str, Any]] = {}
 LIVE_OUTPUT_TAIL_LIMIT = 12000
 LIVE_EVENT_LIMIT = 120
 PROCESS_STOP_WAIT_SECONDS = 5
+PLANNER_STOP_EVENT = threading.Event()
+PLANNER_THREAD: threading.Thread | None = None
+PLANNER_RUNTIME_LOCK = threading.Lock()
+PLANNER_LLM_TOKEN_BUCKET = float(PLANNER_GLOBAL_RPM)
+PLANNER_LLM_LAST_REFILL = time.monotonic()
+PLANNER_LLM_INFLIGHT = 0
+PLANNER_TARGET_LAST_LLM_AT: dict[str, float] = {}
+
+
+class _PlannerLlmPermit:
+    def __init__(self, target_id: str | None):
+        self.target_id = target_id or "unknown"
+
+    def __enter__(self) -> "_PlannerLlmPermit":
+        _enforce_planner_llm_limits(self.target_id)
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        _release_planner_llm_inflight()
 
 
 class TargetInput(BaseModel):
@@ -1916,6 +1941,60 @@ def _build_llm_user_prompt(ip_address: str, operator_prompt: str, target_context
     return f"Target IP: {ip_address}\nOperator request: {operator_prompt}\n\nCurrent target context:\n{target_context}"
 
 
+def _planner_unresolved_actions(target: dict[str, Any]) -> list[dict[str, Any]]:
+    unresolved_statuses = {"pending_approval", "blocked", "approved", "running", "stopping"}
+    return [item for item in target.get("agent_actions", []) if item.get("status") in unresolved_statuses]
+
+
+def _planner_should_skip_tick(target: dict[str, Any]) -> tuple[bool, str | None, int]:
+    unresolved_count = len(_planner_unresolved_actions(target))
+    if unresolved_count > PLANNER_MAX_UNRESOLVED_ACTIONS:
+        return (
+            True,
+            f"Planner tick skipped: unresolved action cap exceeded ({unresolved_count}>{PLANNER_MAX_UNRESOLVED_ACTIONS}).",
+            unresolved_count,
+        )
+    return False, None, unresolved_count
+
+
+def _enforce_planner_llm_limits(target_id: str) -> None:
+    global PLANNER_LLM_TOKEN_BUCKET, PLANNER_LLM_LAST_REFILL, PLANNER_LLM_INFLIGHT
+    while True:
+        wait_seconds = 0.0
+        now = time.monotonic()
+        with PLANNER_RUNTIME_LOCK:
+            elapsed = max(0.0, now - PLANNER_LLM_LAST_REFILL)
+            refill = elapsed * (PLANNER_GLOBAL_RPM / 60.0)
+            if refill > 0:
+                PLANNER_LLM_TOKEN_BUCKET = min(float(PLANNER_GLOBAL_RPM), PLANNER_LLM_TOKEN_BUCKET + refill)
+                PLANNER_LLM_LAST_REFILL = now
+
+            last_target_call = PLANNER_TARGET_LAST_LLM_AT.get(target_id)
+            cooldown_remaining = 0.0 if last_target_call is None else max(0.0, PLANNER_TARGET_COOLDOWN_SECONDS - (now - last_target_call))
+
+            if PLANNER_LLM_INFLIGHT >= PLANNER_INFLIGHT_LIMIT:
+                wait_seconds = max(wait_seconds, 0.05)
+            if PLANNER_LLM_TOKEN_BUCKET < 1.0:
+                deficit = 1.0 - PLANNER_LLM_TOKEN_BUCKET
+                wait_seconds = max(wait_seconds, deficit / max(PLANNER_GLOBAL_RPM / 60.0, 1e-6))
+            if cooldown_remaining > 0.0:
+                wait_seconds = max(wait_seconds, cooldown_remaining)
+
+            if wait_seconds <= 0.0:
+                PLANNER_LLM_TOKEN_BUCKET = max(0.0, PLANNER_LLM_TOKEN_BUCKET - 1.0)
+                PLANNER_LLM_INFLIGHT += 1
+                PLANNER_TARGET_LAST_LLM_AT[target_id] = now
+                return
+
+        time.sleep(min(wait_seconds, 0.5))
+
+
+def _release_planner_llm_inflight() -> None:
+    global PLANNER_LLM_INFLIGHT
+    with PLANNER_RUNTIME_LOCK:
+        PLANNER_LLM_INFLIGHT = max(0, PLANNER_LLM_INFLIGHT - 1)
+
+
 def _context_snapshot(active_target: dict[str, Any] | None, payload: LlmPromptRequest) -> tuple[str, dict[str, int], list[dict[str, Any]]]:
     if active_target is None:
         return (
@@ -2220,10 +2299,12 @@ def _build_llm_response(payload: LlmPromptRequest) -> dict[str, Any]:
     assistant_message = None
     assistant_content = ""
     model_error = None
+    skip_planner_tick = False
+    skip_reason = None
 
     if active_target is not None:
         def mutate(target: dict[str, Any]) -> None:
-            nonlocal queued_actions, user_message
+            nonlocal queued_actions, user_message, skip_planner_tick, skip_reason
             user_message = _append_conversation_message(
                 target,
                 "user",
@@ -2235,7 +2316,17 @@ def _build_llm_response(payload: LlmPromptRequest) -> dict[str, Any]:
                 },
             )
             queued_actions = _append_action_templates(target, _requested_operator_actions(target, payload.prompt))
-            _refresh_agent_actions(target)
+            skip_planner_tick, skip_reason, unresolved_count = _planner_should_skip_tick(target)
+            if skip_planner_tick:
+                target["timeline"].append(
+                    _timeline_event(
+                        "planner_tick_skipped",
+                        skip_reason or "Planner tick skipped.",
+                        {"unresolved_actions": unresolved_count, "max_unresolved_actions": PLANNER_MAX_UNRESOLVED_ACTIONS},
+                    )
+                )
+            else:
+                _refresh_agent_actions(target)
 
         active_target = _with_target_lock(active_target["id"], mutate)
 
@@ -2244,15 +2335,16 @@ def _build_llm_response(payload: LlmPromptRequest) -> dict[str, Any]:
             history = _recent_conversation_messages(active_target)
             if history and history[-1]["role"] == "user" and history[-1]["content"] == payload.prompt:
                 history = history[:-1]
-            response = _call_ollama_chat(
-                resolved_model,
-                [
-                    {"role": "system", "content": _llm_system_prompt()},
-                    {"role": "system", "content": f"Current target context:\n{target_context}"},
-                    *history,
-                    {"role": "user", "content": payload.prompt},
-                ],
-            )
+            with _PlannerLlmPermit(active_target.get("id")):
+                response = _call_ollama_chat(
+                    resolved_model,
+                    [
+                        {"role": "system", "content": _llm_system_prompt()},
+                        {"role": "system", "content": f"Current target context:\n{target_context}"},
+                        *history,
+                        {"role": "user", "content": payload.prompt},
+                    ],
+                )
             assistant_content = response["content"] or ""
             resolved_model = response["model"] or resolved_model
         except Exception as exc:  # noqa: BLE001
@@ -2387,6 +2479,175 @@ def _target_report(target: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _planner_target_overloaded(target: dict[str, Any]) -> bool:
+    unresolved_count = len(_planner_unresolved_actions(target))
+    return unresolved_count >= PLANNER_MAX_PENDING_ACTIONS or _job_is_active(target) or _action_is_active(target)
+
+
+def _planner_eligible_targets() -> list[str]:
+    eligible: list[str] = []
+    with STATE_LOCK:
+        for summary in _list_targets():
+            target = _load_target(summary["id"])
+            if target.get("deleted_at"):
+                continue
+            if target.get("status") not in {"ready", "enumerating"}:
+                continue
+            if _planner_target_overloaded(target):
+                continue
+            eligible.append(target["id"])
+    return eligible
+
+
+def _planner_prompt(target: dict[str, Any], context_blob: str) -> str:
+    return (
+        "Planner mode: propose at most 2 NEXT approval-gated actions based only on stored evidence. "
+        "Return strict JSON object with key 'actions' as a list. "
+        "Each action supports: label, risk, reason, command, parser, category, stage, priority, mindset. "
+        "Do not include already completed actions and do not invent findings.\n\n"
+        f"Target: {target.get('display_name') or target['ip_address']}\nContext:\n{context_blob}"
+    )
+
+
+def _parse_planner_actions(raw_content: str) -> list[dict[str, Any]]:
+    if not raw_content:
+        return []
+    text = raw_content.strip()
+    match = re.search(r"\{[\s\S]*\}", text)
+    if match:
+        text = match.group(0)
+    payload = json.loads(text)
+    if not isinstance(payload, dict):
+        return []
+    actions = payload.get("actions")
+    if not isinstance(actions, list):
+        return []
+    parsed: list[dict[str, Any]] = []
+    for item in actions[:2]:
+        if not isinstance(item, dict):
+            continue
+        command = str(item.get("command") or "").strip()
+        label = str(item.get("label") or "").strip()
+        if not command or not label:
+            continue
+        parsed.append(
+            {
+                "label": label[:120],
+                "risk": str(item.get("risk") or "safe"),
+                "approval_required": True,
+                "reason": str(item.get("reason") or "Planner suggested the next evidence-backed step."),
+                "command": command,
+                "parser": str(item.get("parser") or "generic_text"),
+                "category": str(item.get("category") or "planner_generated"),
+                "stage": str(item.get("stage") or "general"),
+                "priority": int(item.get("priority") or 50),
+                "mindset": str(item.get("mindset") or "Advance one concrete hypothesis with minimal noise."),
+                "source": "planner_runtime",
+            }
+        )
+    return parsed
+
+
+def _planner_tick_target(target_id: str) -> None:
+    target = _load_target(target_id)
+    _log_activity(target_id, "planner_tick_started", "Planner tick started.", {"target_id": target_id})
+    skip_tick, skip_reason, unresolved_count = _planner_should_skip_tick(target)
+    if skip_tick:
+        def mark_skipped(locked_target: dict[str, Any]) -> None:
+            locked_target.setdefault("timeline", []).append(
+                _timeline_event(
+                    "planner_tick_skipped",
+                    skip_reason or "Planner tick skipped.",
+                    {"unresolved_actions": unresolved_count, "max_unresolved_actions": PLANNER_MAX_UNRESOLVED_ACTIONS},
+                )
+            )
+
+        _with_target_lock(target_id, mark_skipped)
+        _log_activity(
+            target_id,
+            "planner_tick_skipped",
+            skip_reason or "Planner tick skipped.",
+            {"unresolved_actions": unresolved_count, "max_unresolved_actions": PLANNER_MAX_UNRESOLVED_ACTIONS},
+        )
+        return
+
+    context_blob, _, _ = _context_snapshot(target, LlmPromptRequest(target_id=target_id, prompt="planner", include_timeline=True))
+    model, _ = _resolve_llm_model("auto")
+    try:
+        queued_actions: list[dict[str, Any]] = []
+        if model:
+            with _PlannerLlmPermit(target_id):
+                response = _call_ollama_chat(
+                    model,
+                    [
+                        {"role": "system", "content": _llm_system_prompt()},
+                        {"role": "user", "content": _planner_prompt(target, context_blob)},
+                    ],
+                )
+            proposed = _parse_planner_actions(response.get("content", ""))
+            if proposed:
+                def mutate(locked_target: dict[str, Any]) -> None:
+                    nonlocal queued_actions
+                    queued_actions = _append_action_templates(locked_target, proposed)
+                    if queued_actions:
+                        locked_target.setdefault("timeline", []).append(
+                            _timeline_event(
+                                "planner_actions_queued",
+                                "Planner queued approval-gated actions.",
+                                {"count": len(queued_actions), "action_ids": [a.get("id") for a in queued_actions]},
+                            )
+                        )
+
+                _with_target_lock(target_id, mutate)
+        if queued_actions:
+            _log_activity(
+                target_id,
+                "planner_actions_queued",
+                "Planner queued actions.",
+                {"count": len(queued_actions), "action_ids": [a.get("id") for a in queued_actions]},
+            )
+        else:
+            _log_activity(target_id, "planner_noop", "Planner found no new actions.", {})
+    except Exception as exc:
+        _log_activity(target_id, "planner_error", "Planner tick failed.", {"error": str(exc)})
+
+
+def _planner_loop() -> None:
+    while not PLANNER_STOP_EVENT.wait(max(5.0, PLANNER_INTERVAL_SECONDS)):
+        for target_id in _planner_eligible_targets():
+            if PLANNER_STOP_EVENT.is_set():
+                return
+            _planner_tick_target(target_id)
+
+
+def _start_planner_runtime() -> None:
+    global PLANNER_THREAD
+    if PLANNER_THREAD and PLANNER_THREAD.is_alive():
+        return
+    PLANNER_STOP_EVENT.clear()
+    PLANNER_THREAD = threading.Thread(target=_planner_loop, name="htbmc-planner", daemon=True)
+    PLANNER_THREAD.start()
+
+
+def _stop_planner_runtime() -> None:
+    global PLANNER_THREAD
+    PLANNER_STOP_EVENT.set()
+    thread = PLANNER_THREAD
+    if thread and thread.is_alive():
+        thread.join(timeout=3)
+    PLANNER_THREAD = None
+
+
+@app.on_event("startup")
+def _app_startup() -> None:
+    _start_planner_runtime()
+
+
+@app.on_event("shutdown")
+def _app_shutdown() -> None:
+    _stop_planner_runtime()
+
+
 def _settings_payload() -> dict[str, Any]:
     return {
         "state_dir": str(STATE_DIR),
@@ -2397,6 +2658,14 @@ def _settings_payload() -> dict[str, Any]:
         "action_timeout_seconds": ACTION_TIMEOUT_SECONDS,
         "ollama_base_url": _resolved_ollama_base_url(),
         "ollama_timeout_seconds": OLLAMA_TIMEOUT_SECONDS,
+        "planner": {
+            "interval_seconds": PLANNER_INTERVAL_SECONDS,
+            "max_pending_actions": PLANNER_MAX_PENDING_ACTIONS,
+            "global_rpm": PLANNER_GLOBAL_RPM,
+            "inflight_limit": PLANNER_INFLIGHT_LIMIT,
+            "target_cooldown_seconds": PLANNER_TARGET_COOLDOWN_SECONDS,
+            "max_unresolved_actions": PLANNER_MAX_UNRESOLVED_ACTIONS,
+        },
         "cors": {"allow_origins": ["*"], "allow_credentials": False},
     }
 
