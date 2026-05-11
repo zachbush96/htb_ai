@@ -2387,6 +2387,144 @@ def _target_report(target: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+
+PLANNER_INTERVAL_SECONDS = float(os.getenv("HTBMC_PLANNER_INTERVAL_SECONDS", "20"))
+PLANNER_MAX_PENDING_ACTIONS = int(os.getenv("HTBMC_PLANNER_MAX_PENDING_ACTIONS", "6"))
+PLANNER_STOP_EVENT = threading.Event()
+PLANNER_THREAD: threading.Thread | None = None
+
+
+def _planner_target_overloaded(target: dict[str, Any]) -> bool:
+    pending_count = len([item for item in target.get("agent_actions", []) if item.get("status") in {"pending_approval", "blocked", "approved", "running", "stopping"}])
+    return pending_count >= PLANNER_MAX_PENDING_ACTIONS or _job_is_active(target) or _action_is_active(target)
+
+
+def _planner_eligible_targets() -> list[str]:
+    eligible: list[str] = []
+    with STATE_LOCK:
+        for summary in _list_targets():
+            target = _load_target(summary["id"])
+            if target.get("deleted_at"):
+                continue
+            if target.get("status") not in {"ready", "enumerating"}:
+                continue
+            if _planner_target_overloaded(target):
+                continue
+            eligible.append(target["id"])
+    return eligible
+
+
+def _planner_prompt(target: dict[str, Any], context_blob: str) -> str:
+    return (
+        "Planner mode: propose at most 2 NEXT approval-gated actions based only on stored evidence. "
+        "Return strict JSON object with key 'actions' as a list. "
+        "Each action supports: label, risk, reason, command, parser, category, stage, priority, mindset. "
+        "Do not include already completed actions and do not invent findings.\n\n"
+        f"Target: {target.get('display_name') or target['ip_address']}\nContext:\n{context_blob}"
+    )
+
+
+def _parse_planner_actions(raw_content: str) -> list[dict[str, Any]]:
+    if not raw_content:
+        return []
+    text = raw_content.strip()
+    match = re.search(r"\{[\s\S]*\}", text)
+    if match:
+        text = match.group(0)
+    payload = json.loads(text)
+    if not isinstance(payload, dict):
+        return []
+    actions = payload.get("actions")
+    if not isinstance(actions, list):
+        return []
+    parsed: list[dict[str, Any]] = []
+    for item in actions[:2]:
+        if not isinstance(item, dict):
+            continue
+        command = str(item.get("command") or "").strip()
+        label = str(item.get("label") or "").strip()
+        if not command or not label:
+            continue
+        parsed.append({
+            "label": label[:120],
+            "risk": str(item.get("risk") or "safe"),
+            "approval_required": True,
+            "reason": str(item.get("reason") or "Planner suggested the next evidence-backed step."),
+            "command": command,
+            "parser": str(item.get("parser") or "generic_text"),
+            "category": str(item.get("category") or "planner_generated"),
+            "stage": str(item.get("stage") or "general"),
+            "priority": int(item.get("priority") or 50),
+            "mindset": str(item.get("mindset") or "Advance one concrete hypothesis with minimal noise."),
+            "source": "planner_runtime",
+        })
+    return parsed
+
+
+def _planner_tick_target(target_id: str) -> None:
+    target = _load_target(target_id)
+    _log_activity(target_id, "planner_tick_started", "Planner tick started.", {"target_id": target_id})
+    context_blob, _, _ = _context_snapshot(target, LlmPromptRequest(target_id=target_id, prompt="planner", include_timeline=True))
+    model, _ = _resolve_llm_model("auto")
+    try:
+        queued_actions: list[dict[str, Any]] = []
+        if model:
+            response = _call_ollama_chat(model, [
+                {"role": "system", "content": _llm_system_prompt()},
+                {"role": "user", "content": _planner_prompt(target, context_blob)},
+            ])
+            proposed = _parse_planner_actions(response.get("content", ""))
+            if proposed:
+                def mutate(locked_target: dict[str, Any]) -> None:
+                    nonlocal queued_actions
+                    queued_actions = _append_action_templates(locked_target, proposed)
+                    if queued_actions:
+                        locked_target.setdefault("timeline", []).append(
+                            _timeline_event("planner_actions_queued", "Planner queued approval-gated actions.", {"count": len(queued_actions), "action_ids": [a.get("id") for a in queued_actions]})
+                        )
+
+                _with_target_lock(target_id, mutate)
+        if queued_actions:
+            _log_activity(target_id, "planner_actions_queued", "Planner queued actions.", {"count": len(queued_actions), "action_ids": [a.get("id") for a in queued_actions]})
+        else:
+            _log_activity(target_id, "planner_noop", "Planner found no new actions.", {})
+    except Exception as exc:
+        _log_activity(target_id, "planner_error", "Planner tick failed.", {"error": str(exc)})
+
+
+def _planner_loop() -> None:
+    while not PLANNER_STOP_EVENT.wait(max(5.0, PLANNER_INTERVAL_SECONDS)):
+        for target_id in _planner_eligible_targets():
+            if PLANNER_STOP_EVENT.is_set():
+                return
+            _planner_tick_target(target_id)
+
+
+def _start_planner_runtime() -> None:
+    global PLANNER_THREAD
+    if PLANNER_THREAD and PLANNER_THREAD.is_alive():
+        return
+    PLANNER_STOP_EVENT.clear()
+    PLANNER_THREAD = threading.Thread(target=_planner_loop, name="htbmc-planner", daemon=True)
+    PLANNER_THREAD.start()
+
+
+def _stop_planner_runtime() -> None:
+    PLANNER_STOP_EVENT.set()
+    thread = PLANNER_THREAD
+    if thread and thread.is_alive():
+        thread.join(timeout=3)
+
+
+@app.on_event("startup")
+def _app_startup() -> None:
+    _start_planner_runtime()
+
+
+@app.on_event("shutdown")
+def _app_shutdown() -> None:
+    _stop_planner_runtime()
+
 def _settings_payload() -> dict[str, Any]:
     return {
         "state_dir": str(STATE_DIR),
