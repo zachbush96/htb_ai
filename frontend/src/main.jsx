@@ -1,13 +1,15 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
-import { buildExecutionItems, cleanSummaryText, executionIsActive, executionKey, findCredentialHints, inferDefaultApiBase, loadUiSettings, NAV_ITEMS, normalizeError, sortApprovalQueue } from './lib/app-utils'
+import { buildExecutionItems, cleanSummaryText, commandAllowlistFromRuntime, executionIsActive, executionKey, findCredentialHints, inferDefaultApiBase, loadUiSettings, NAV_ITEMS, normalizeError, sortApprovalQueue } from './lib/app-utils'
 import { ConversationView } from './views/conversation'
 import { DashboardView } from './views/dashboard'
+import { ProgressView } from './views/progress'
 import { TargetsView } from './views/targets'
 import { TimelinePanel } from './views/timeline'
 import { ApprovalsPanel } from './views/approvals'
 import { JobsPanel } from './views/jobs'
+import { ShellView } from './views/shell'
 import { LootView } from './views/loot'
 import { CredentialsView } from './views/credentials'
 import { ReportsView } from './views/reports'
@@ -30,6 +32,7 @@ function App() {
   const [modelCatalog, setModelCatalog] = useState(null)
   const [reports, setReports] = useState(null)
   const [targetReport, setTargetReport] = useState(null)
+  const [toolCatalog, setToolCatalog] = useState(null)
   const [llmPrompts, setLlmPrompts] = useState(null)
   const [llmPlanner, setLlmPlanner] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -102,7 +105,7 @@ function App() {
 
   async function refreshEverything(preferredTargetId = activeTargetId) {
     try {
-      const [health, targetList, settingsPayload, modelPayload, reportPayload, promptPayload, plannerPayload] = await Promise.all([
+      const [health, targetList, settingsPayload, modelPayload, reportPayload, promptPayload, plannerPayload, toolPayload] = await Promise.all([
         request('/healthz'),
         request('/api/targets'),
         request('/api/settings'),
@@ -119,6 +122,7 @@ function App() {
         request('/api/reports/overview'),
         request('/api/llm/prompts'),
         request('/api/llm/planner'),
+        request('/api/tools/catalog'),
       ])
       setBackendHealth(health)
       setRuntimeSettings(settingsPayload.settings)
@@ -127,6 +131,7 @@ function App() {
       setReports(reportPayload)
       setLlmPrompts(promptPayload.prompts)
       setLlmPlanner(plannerPayload.planner)
+      setToolCatalog(toolPayload)
       setTargets(targetList)
       const nextId = preferredTargetId && targetList.some((item) => item.id === preferredTargetId)
         ? preferredTargetId
@@ -397,6 +402,51 @@ function App() {
     }
   }
 
+  async function setAutonomyProfile(profile) {
+    if (!activeTargetId) return
+    setLoading(true)
+    setError('')
+    try {
+      await request(`/api/targets/${activeTargetId}/autonomy/profile`, {
+        method: 'POST',
+        body: JSON.stringify({ profile }),
+      })
+      await refreshEverything(activeTargetId)
+    } catch (err) {
+      setError(normalizeError(err))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function pauseAutonomy() {
+    if (!activeTargetId) return
+    setLoading(true)
+    setError('')
+    try {
+      await request(`/api/targets/${activeTargetId}/autonomy/pause`, { method: 'POST' })
+      await refreshEverything(activeTargetId)
+    } catch (err) {
+      setError(normalizeError(err))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function resumeAutonomy() {
+    if (!activeTargetId) return
+    setLoading(true)
+    setError('')
+    try {
+      await request(`/api/targets/${activeTargetId}/autonomy/resume`, { method: 'POST' })
+      await refreshEverything(activeTargetId)
+    } catch (err) {
+      setError(normalizeError(err))
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const latestJob = activeTarget?.jobs?.[activeTarget.jobs.length - 1] || null
   const services = activeTarget?.services || []
   const findings = activeTarget?.findings || []
@@ -405,7 +455,7 @@ function App() {
   const observations = activeTarget?.observations || []
   const timeline = [...(activeTarget?.timeline || [])].reverse()
   const approvalQueue = sortApprovalQueue(actions.filter((item) => item.status === 'pending_approval' || item.status === 'blocked'))
-  const commandAllowlist = uiSettings.commandAllowlist
+  const commandAllowlist = commandAllowlistFromRuntime(runtimeSettings, uiSettings.commandAllowlist)
   const completedActions = actions.filter((item) => ['completed', 'failed', 'stopped'].includes(item.status))
   const runningJobs = (activeTarget?.jobs || []).filter((job) => ['running', 'queued', 'stopping'].includes(job.status))
   const executionItems = buildExecutionItems(activeTarget)
@@ -434,8 +484,10 @@ function App() {
 
   const navCounts = useMemo(() => ({
     conversation: activeTarget?.conversation?.length || 0,
+    progress: (activeTarget?.decision_journal?.length || 0) + (activeTarget?.sessions?.length || 0),
     approvals: approvalQueue.length,
     jobs: activeExecutionCount,
+    shell: activeTarget?.services?.some((service) => ['ssh', 'telnet'].includes(String(service.service || '').toLowerCase()) || [22, 23, 1524, 4444, 6200].includes(Number(service.port || 0))) ? 1 : 0,
     reports: reports?.totals?.findings || 0,
     targets: targets.length,
     loot: observations.length,
@@ -480,6 +532,19 @@ function App() {
           runPlannerStep={runPlannerStep}
           setPlannerEnabled={setPlannerEnabled}
           commandAllowlist={commandAllowlist}
+          targetReport={targetReport}
+        />
+      )
+    }
+    if (activeView === 'progress') {
+      return (
+        <ProgressView
+          activeTarget={activeTarget}
+          targetReport={targetReport}
+          setAutonomyProfile={setAutonomyProfile}
+          pauseAutonomy={pauseAutonomy}
+          resumeAutonomy={resumeAutonomy}
+          loading={loading}
         />
       )
     }
@@ -487,11 +552,12 @@ function App() {
     if (activeView === 'timeline') return <TimelinePanel entries={[...timeline, ...logs.slice().reverse()]} className="full-view" />
     if (activeView === 'approvals') return <ApprovalsPanel approvalQueue={approvalQueue} loading={loading} decideAction={decideAction} removeAction={removeAction} commandAllowlist={commandAllowlist} />
     if (activeView === 'jobs') return <JobsPanel activeTarget={activeTarget} selectedExecutionKey={selectedExecutionKey} setSelectedExecutionKey={setSelectedExecutionKey} stopExecution={stopExecution} loading={loading} commandAllowlist={commandAllowlist} />
+    if (activeView === 'shell') return <ShellView activeTarget={activeTarget} apiBase={apiBase} request={request} />
     if (activeView === 'loot') return <LootView activeTarget={activeTarget} />
     if (activeView === 'credentials') return <CredentialsView activeTarget={activeTarget} />
     if (activeView === 'reports') return <ReportsView reports={reports} activeTarget={activeTarget} targetReport={targetReport} />
     if (activeView === 'team') return <TeamView backendHealth={backendHealth} />
-    if (activeView === 'settings') return <SettingsView apiBase={apiBase} setApiBase={setApiBase} uiSettings={uiSettings} setUiSettings={setUiSettings} runtimeSettings={runtimeSettings} diagnostics={diagnostics} modelCatalog={modelCatalog} refreshModelCatalog={refreshModelCatalog} testSettings={testSettings} llmPrompts={llmPrompts} llmPlanner={llmPlanner} updateLlmSettings={updateLlmSettings} setPlannerEnabled={setPlannerEnabled} loading={loading} />
+    if (activeView === 'settings') return <SettingsView apiBase={apiBase} setApiBase={setApiBase} uiSettings={uiSettings} setUiSettings={setUiSettings} runtimeSettings={runtimeSettings} diagnostics={diagnostics} modelCatalog={modelCatalog} refreshModelCatalog={refreshModelCatalog} testSettings={testSettings} llmPrompts={llmPrompts} llmPlanner={llmPlanner} updateLlmSettings={updateLlmSettings} setPlannerEnabled={setPlannerEnabled} loading={loading} toolCatalog={toolCatalog} />
 
     return (
       <DashboardView

@@ -1,10 +1,12 @@
 export const NAV_ITEMS = [
   { id: 'conversation', label: 'Conversation', icon: 'CN' },
+  { id: 'progress', label: 'Progress', icon: 'PG' },
   { id: 'dashboard', label: 'Dashboard', icon: 'DB' },
   { id: 'targets', label: 'Targets', icon: 'TG' },
   { id: 'timeline', label: 'Timeline', icon: 'TL' },
   { id: 'approvals', label: 'Approvals', icon: 'AP' },
   { id: 'jobs', label: 'Jobs', icon: 'JB' },
+  { id: 'shell', label: 'Shell', icon: 'SH' },
   { id: 'loot', label: 'Loot', icon: 'LT' },
   { id: 'credentials', label: 'Credentials', icon: 'CR' },
   { id: 'reports', label: 'Reports', icon: 'RP' },
@@ -14,6 +16,9 @@ export const NAV_ITEMS = [
 
 export const DEFAULT_COMMAND_ALLOWLIST = [
   'curl',
+  'dig',
+  'enum4linux-ng',
+  'feroxbuster',
   'nmap',
   'ffuf',
   'gobuster',
@@ -21,6 +26,10 @@ export const DEFAULT_COMMAND_ALLOWLIST = [
   'smbclient',
   'enum4linux',
   'nikto',
+  'whatweb',
+  'smbmap',
+  'ldapsearch',
+  'snmpwalk',
   'whatweb',
   'wget',
 ]
@@ -58,6 +67,10 @@ export function normalizeCommandAllowlist(commands = []) {
     .map((item) => String(item || '').trim().toLowerCase())
     .filter((item) => /^[a-z0-9][a-z0-9._+-]*$/.test(item)))]
     .sort((left, right) => left.localeCompare(right))
+}
+
+export function commandAllowlistFromRuntime(runtimeSettings, fallback = DEFAULT_COMMAND_ALLOWLIST) {
+  return normalizeCommandAllowlist(runtimeSettings?.llm?.command_allowlist || fallback)
 }
 
 export function commandNameFromItem(item) {
@@ -253,6 +266,17 @@ export function executionStatusCopy(item) {
   if (item.status === 'completed') return 'Completed successfully.'
   if (item.status === 'failed') return 'Exited with an error.'
   return cleanDisplayText(item.status, 'unknown state')
+}
+
+export function objectiveTone(value) {
+  const normalized = String(value || '').toLowerCase()
+  if (['owned', 'privesc', 'post-access'].includes(normalized)) return 'good'
+  if (['initial-access', 'cred-hunting'].includes(normalized)) return 'warn'
+  return 'info'
+}
+
+export function formatObjectiveLabel(value) {
+  return cleanDisplayText(String(value || 'recon').replace(/[_-]+/g, ' '), 'recon')
 }
 
 export function executionExitLabel(item) {

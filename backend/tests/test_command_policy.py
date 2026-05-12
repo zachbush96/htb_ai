@@ -75,6 +75,20 @@ class CommandPolicyTests(unittest.TestCase):
 
         self.assertTrue({"nmap", "curl", "wget", "smbclient"}.issubset(self.app._command_allowlist()))
 
+    def test_save_runtime_settings_preserves_existing_allowlist_when_payload_omits_it(self) -> None:
+        original = self.app._save_runtime_settings(
+            {
+                "command_allowlist": ["curl", "ffuf", "nmap"],
+                "default_model": "llama3.2:3b",
+            }
+        )
+
+        saved = self.app._save_runtime_settings({"temperature": 0.7})
+
+        self.assertEqual(original["command_allowlist"], ["curl", "ffuf", "nmap"])
+        self.assertEqual(saved["command_allowlist"], ["curl", "ffuf", "nmap"])
+        self.assertEqual(saved["temperature"], 0.7)
+
     def test_allowlisted_routine_commands_auto_approve_existing_queue(self) -> None:
         target = self._target_with_actions(
             [
@@ -136,6 +150,177 @@ class CommandPolicyTests(unittest.TestCase):
 
         self.assertLessEqual(len(prompt), 4000)
         self.assertIn("Never repeat the exact failed command", prompt)
+
+    def test_planner_parses_string_priorities(self) -> None:
+        parsed = self.app._parse_planner_actions(
+            '{"actions":[{"label":"Validate web route","command":"curl -iskL http://192.168.1.171","priority":"high"}]}'
+        )
+
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["priority"], 75)
+
+    def test_extract_credentials_from_metasploitable_banner(self) -> None:
+        action = {"id": "act_banner", "label": "Fetch landing page"}
+        output = "Warning: Never expose this VM to an untrusted network! Login with msfadmin/msfadmin to get started"
+
+        credentials = self.app._extract_credentials_from_output(action, output)
+
+        self.assertEqual(len(credentials), 1)
+        self.assertEqual(credentials[0]["username"], "msfadmin")
+        self.assertEqual(credentials[0]["password"], "msfadmin")
+
+    def test_shell_candidates_include_ssh_credentials(self) -> None:
+        target = self._target_with_actions([])
+        target["services"] = [{"port": 22, "protocol": "tcp", "service": "ssh", "detail": "OpenSSH"}]
+        target["observations"] = [{"title": "creds", "summary": "username: msfadmin password: msfadmin"}]
+
+        candidates = self.app._shell_service_candidates(target)
+
+        self.assertEqual(candidates[0]["protocol"], "ssh")
+        self.assertEqual(candidates[0]["username"], "msfadmin")
+        self.assertEqual(candidates[0]["password"], "msfadmin")
+        self.assertTrue(candidates[0]["has_password"])
+
+    def test_extract_session_records_ignores_generic_system_text(self) -> None:
+        action = {"id": "act_twiki", "label": "Inspect the TWiki path directly"}
+        output = "<title>Welcome to TWiki - A Web-based Collaboration Platform</title><p>System requirements and installation notes.</p>"
+
+        sessions = self.app._extract_session_records(action, output)
+
+        self.assertEqual(sessions, [])
+
+    def test_shell_session_rejects_non_target_host(self) -> None:
+        target = self._target_with_actions([])
+        payload = self.app.ShellSessionInput(protocol="ssh", host="192.168.1.250", port=22)
+
+        with self.assertRaises(Exception):
+            self.app._shell_command_for_session(target, payload)
+
+    def test_normalize_target_adds_attack_graph_and_autonomy_defaults(self) -> None:
+        target = self._target_with_actions([])
+        target["label"] = "demo"
+        target["status"] = "ready"
+        target["phase"] = "awaiting_enumeration"
+        target["created_at"] = self.app._now()
+        target["updated_at"] = self.app._now()
+        target["latest_summary"] = "Target created."
+        self.app._write_json(Path(self.tmpdir.name) / "targets" / "target_test" / "target.json", target)
+
+        normalized = self.app._load_target("target_test")
+
+        self.assertEqual(normalized["schema_version"], self.app.STATE_SCHEMA_VERSION)
+        self.assertIn("attack_graph", normalized)
+        self.assertIn("autonomy", normalized)
+        self.assertEqual(normalized["objectives"]["current_phase"], "recon")
+
+    def test_normalize_target_retrofits_credentials_and_sessions_from_completed_output(self) -> None:
+        target = self._target_with_actions([])
+        target["label"] = "demo"
+        target["status"] = "ready"
+        target["phase"] = "awaiting_approval"
+        target["created_at"] = self.app._now()
+        target["updated_at"] = self.app._now()
+        target["latest_summary"] = "Target created."
+        target["services"] = [
+            {"port": 80, "protocol": "tcp", "service": "http", "detail": "Apache"},
+            {"port": 1524, "protocol": "tcp", "service": "ingreslock", "detail": ""},
+        ]
+        target["jobs"] = [
+            {
+                "id": "job_initial",
+                "kind": "enumeration",
+                "label": "Initial baseline enumeration",
+                "status": "completed",
+                "command": "nmap -Pn 192.168.1.171",
+                "created_at": self.app._now(),
+                "updated_at": self.app._now(),
+                "started_at": self.app._now(),
+                "finished_at": self.app._now(),
+                "output_path": None,
+                "error": None,
+                "return_code": 0,
+                "summary": "done",
+                "pid": None,
+                "output_bytes": 0,
+                "last_output_at": None,
+                "live_output_tail": "SF-Port1524-TCP root@52023eda1ffd:/# uid=0(root) gid=0(root)",
+                "stop_requested_at": None,
+                "termination_reason": None,
+            }
+        ]
+        target["agent_actions"].append(
+            {
+                "id": "act_http",
+                "label": "Fetch landing page",
+                "risk": "safe",
+                "reason": "test",
+                "command": "curl -iskL http://192.168.1.171",
+                "parser": "http_response",
+                "category": "http_fingerprint_http-80",
+                "status": "completed",
+                "approval_required": True,
+                "auto_approved": False,
+                "tool_available": True,
+                "binary": "curl",
+                "created_at": self.app._now(),
+                "updated_at": self.app._now(),
+                "approved_at": self.app._now(),
+                "denied_at": None,
+                "started_at": self.app._now(),
+                "finished_at": self.app._now(),
+                "output_path": None,
+                "summary": None,
+                "parse_summary": None,
+                "result_excerpt": None,
+                "error": None,
+                "decision_note": None,
+                "pid": None,
+                "output_bytes": 0,
+                "last_output_at": None,
+                "live_output_tail": "Login with msfadmin/msfadmin to get started",
+                "stop_requested_at": None,
+                "termination_reason": None,
+                "stage": "web-fingerprint",
+                "priority": 20,
+                "source": "playbook",
+                "mindset": None,
+                "requires": [],
+                "produces": [],
+                "confidence": "observed",
+                "noise_level": "low",
+                "stop_on_success": False,
+                "campaign": "web-enum",
+            }
+        )
+        self.app._write_json(Path(self.tmpdir.name) / "targets" / "target_test" / "target.json", target)
+
+        normalized = self.app._load_target("target_test")
+
+        self.assertTrue(any(item["label"] == "msfadmin:msfadmin" for item in normalized["credentials"]))
+        self.assertTrue(normalized["sessions"])
+        self.assertEqual(normalized["objectives"]["current_phase"], "post-access")
+
+    def test_action_policy_blocks_missing_prerequisites_and_noise_overflow(self) -> None:
+        target = self._target_with_actions([])
+        target["autonomy"] = self.app._default_autonomy_state()
+        target["autonomy"]["profile"] = "recon_only"
+        target["autonomy"]["max_noise"] = "low"
+
+        blocked, reason = self.app._action_policy_verdict(
+            target,
+            {
+                "label": "Validate SMB credential",
+                "command": "netexec smb 192.168.1.171 -u demo -p demo",
+                "parser": "credential_probe",
+                "category": "cred_validate",
+                "stage": "credential-validation",
+                "requires": ["credentials", "smb"],
+                "noise_level": "medium",
+            },
+        )
+
+        self.assertFalse(blocked)
+        self.assertTrue("Missing prerequisites" in reason or "Noise level" in reason)
 
 
 if __name__ == "__main__":

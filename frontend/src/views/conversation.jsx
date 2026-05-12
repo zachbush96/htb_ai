@@ -7,6 +7,7 @@ import { JobsPanel } from './jobs'
 
 export function ConversationView({
   activeTarget,
+  targetReport,
   backendHealth,
   approvalQueue,
   loading,
@@ -42,6 +43,8 @@ export function ConversationView({
   const executionItems = buildExecutionItems(activeTarget)
   const latestMessage = conversation[conversation.length - 1] || null
   const targetPlanner = llmPlanner?.targets?.find((item) => item.target_id === activeTarget?.id)?.llm_agent || activeTarget?.llm_agent || {}
+  const decisionJournal = targetReport?.decision_journal || activeTarget?.decision_journal || []
+  const autonomy = targetReport?.autonomy || activeTarget?.autonomy || {}
   const selectedBlockCount = conversationContext.blockIds.length
   const targetSummary = cleanSummaryText(activeTarget.latest_summary, 'Attach target context and ask the model to reason or queue next steps.')
   const promptPresets = [
@@ -198,6 +201,34 @@ export function ConversationView({
                 {llmPlanner?.enabled ? 'Pause Autoplan' : 'Start Autoplan'}
               </button>
             </div>
+          </Panel>
+
+          <Panel
+            title="Decision Journal"
+            meta={decisionJournal.length}
+            actions={(
+              <ActionMenu
+                label="Journal Actions"
+                actions={[
+                  {
+                    label: 'View raw journal',
+                    onSelect: () => actionRuntime.showJson('Decision journal', { autonomy, decisionJournal }),
+                  },
+                ]}
+              />
+            )}
+          >
+            <div className="execution-list">
+              {decisionJournal.slice().reverse().slice(0, 6).map((entry) => (
+                <article key={entry.id}>
+                  <strong>{cleanDisplayText(entry.title, 'Decision')}</strong>
+                  <span>{cleanDisplayText(entry.kind, 'journal')}</span>
+                  <p>{cleanDisplayText(entry.summary, 'No journal summary stored.')}</p>
+                </article>
+              ))}
+              {!decisionJournal.length ? <EmptyState title="No journal entries" body="Planner decisions and structured pivots will appear here." /> : null}
+            </div>
+            {autonomy.pause_reason ? <p className="error-banner">{autonomy.pause_reason}</p> : null}
           </Panel>
 
           <Panel

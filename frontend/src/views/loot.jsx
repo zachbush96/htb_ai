@@ -172,6 +172,8 @@ function ArtifactActions({ item }) {
 export function LootView({ activeTarget }) {
   const observations = activeTarget?.observations || []
   const completed = (activeTarget?.agent_actions || []).filter((item) => item.status === 'completed' && (item.result_excerpt || item.output_path))
+  const credentials = activeTarget?.credentials || []
+  const sessions = activeTarget?.sessions || []
 
   return (
     <div className="view-grid">
@@ -191,6 +193,30 @@ export function LootView({ activeTarget }) {
           {!observations.length ? <EmptyState title="No loot yet" body="Approved actions will add parsed observations here." /> : null}
         </div>
         {observations.length ? <OpsCopyNote>Observation actions include rationale review, raw payload access, summary copy, and a version extractor when banner text exposes one.</OpsCopyNote> : null}
+      </Panel>
+      <Panel title="Harvested Credentials" meta={credentials.length} className="wide">
+        <div className="execution-list">
+          {credentials.map((item) => (
+            <article key={item.id}>
+              <strong>{cleanDisplayText(item.label, 'credential')}</strong>
+              <span>{cleanDisplayText(item.status, 'candidate')}</span>
+              <p>{cleanDisplayText(item.summary, 'No credential summary stored.')}</p>
+            </article>
+          ))}
+          {!credentials.length ? <EmptyState title="No credentials" body="Structured credential candidates will appear here when actions expose them." /> : null}
+        </div>
+      </Panel>
+      <Panel title="Sessions" meta={sessions.length} className="wide">
+        <div className="execution-list">
+          {sessions.map((item) => (
+            <article key={item.id}>
+              <strong>{cleanDisplayText(item.label, 'session')}</strong>
+              <span>{cleanDisplayText(item.status, 'active')}</span>
+              <p>{cleanDisplayText(item.summary, 'No session summary stored.')}</p>
+            </article>
+          ))}
+          {!sessions.length ? <EmptyState title="No sessions" body="Footholds and shell indicators will be preserved here." /> : null}
+        </div>
       </Panel>
       <Panel title="Action Artifacts" meta={completed.length} className="wide">
         <div className="execution-list">

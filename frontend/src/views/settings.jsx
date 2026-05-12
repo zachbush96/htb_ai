@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { DEFAULT_COMMAND_ALLOWLIST, cleanDisplayText, formatDateTime, normalizeCommandAllowlist } from '../lib/app-utils'
+import { DEFAULT_COMMAND_ALLOWLIST, cleanDisplayText, commandAllowlistFromRuntime, formatDateTime, normalizeCommandAllowlist } from '../lib/app-utils'
 import { EmptyState, Panel } from '../components/primitives'
 import { SupportActionMenu, SupportCard, SupportModal, SupportNotice, SupportWhy, useSupportActions } from './support-actions'
 
@@ -20,7 +20,7 @@ function templateWhy(kind) {
   return 'The user prompt template shows how Mission Control expands an operator request into the final LLM input, including target IP and serialized target context.'
 }
 
-export function SettingsView({ apiBase, setApiBase, uiSettings, setUiSettings, runtimeSettings, diagnostics, modelCatalog, refreshModelCatalog, testSettings, llmPrompts, llmPlanner, updateLlmSettings, setPlannerEnabled, loading }) {
+export function SettingsView({ apiBase, setApiBase, uiSettings, setUiSettings, runtimeSettings, diagnostics, modelCatalog, refreshModelCatalog, testSettings, llmPrompts, llmPlanner, updateLlmSettings, setPlannerEnabled, loading, toolCatalog }) {
   const { notice, modal, closeModal, copyValue, openText, openJson, openUrl } = useSupportActions()
   const [llmForm, setLlmForm] = useState(() => runtimeSettings?.llm || {})
   const [commandDraft, setCommandDraft] = useState('')
@@ -35,10 +35,11 @@ export function SettingsView({ apiBase, setApiBase, uiSettings, setUiSettings, r
 
   const ollamaBase = diagnostics?.ollama?.base_url || runtimeSettings?.ollama_base_url || null
   const promptHistory = llmPrompts?.recent_prompts?.slice().reverse() || []
-  const commandAllowlist = normalizeCommandAllowlist(uiSettings.commandAllowlist || DEFAULT_COMMAND_ALLOWLIST)
+  const commandAllowlist = commandAllowlistFromRuntime(runtimeSettings, DEFAULT_COMMAND_ALLOWLIST)
   const discoveredModels = Array.isArray(modelCatalog?.models) ? modelCatalog.models : []
   const currentModel = llmForm.default_model || 'auto'
   const modelOptions = [...new Set(['auto', ...discoveredModels, currentModel].filter(Boolean))]
+  const allowlistSource = runtimeSettings?.llm?.command_allowlist ? 'backend runtime' : 'frontend fallback'
 
   function updateLlmForm(key, value) {
     setLlmForm((current) => ({ ...current, [key]: value }))
@@ -60,20 +61,51 @@ export function SettingsView({ apiBase, setApiBase, uiSettings, setUiSettings, r
       autoplan_include_execution_history: Boolean(llmForm.autoplan_include_execution_history),
       autoplan_prompt: llmForm.autoplan_prompt || '',
       system_prompt: llmForm.system_prompt || null,
+      command_allowlist: normalizeCommandAllowlist(llmForm.command_allowlist || commandAllowlist),
+      autonomy_profile: llmForm.autonomy_profile || 'through_privesc',
+      autonomy_pause_on_credential: Boolean(llmForm.autonomy_pause_on_credential),
+      autonomy_pause_on_session: Boolean(llmForm.autonomy_pause_on_session),
+      autonomy_pause_on_privesc: Boolean(llmForm.autonomy_pause_on_privesc),
+      autonomy_max_noise: llmForm.autonomy_max_noise || 'high',
+    })
+  }
+
+  function updateAllowlist(commands) {
+    const nextAllowlist = normalizeCommandAllowlist(commands)
+    setLlmForm((current) => ({ ...current, command_allowlist: nextAllowlist }))
+    updateLlmSettings({
+      ollama_base_url: llmForm.ollama_base_url || null,
+      ollama_tailscale_host: llmForm.ollama_tailscale_host || null,
+      ollama_timeout_seconds: Number(llmForm.ollama_timeout_seconds || 5),
+      default_model: llmForm.default_model || 'auto',
+      temperature: Number(llmForm.temperature ?? 0.2),
+      num_ctx: Number(llmForm.num_ctx || 8192),
+      autoplan_enabled: Boolean(llmForm.autoplan_enabled),
+      autoplan_interval_seconds: Number(llmForm.autoplan_interval_seconds || 20),
+      autoplan_max_actions_per_turn: Number(llmForm.autoplan_max_actions_per_turn || 4),
+      autoplan_include_timeline: Boolean(llmForm.autoplan_include_timeline),
+      autoplan_include_execution_history: Boolean(llmForm.autoplan_include_execution_history),
+      autoplan_prompt: llmForm.autoplan_prompt || '',
+      system_prompt: llmForm.system_prompt || null,
+      command_allowlist: nextAllowlist,
+      autonomy_profile: llmForm.autonomy_profile || 'through_privesc',
+      autonomy_pause_on_credential: Boolean(llmForm.autonomy_pause_on_credential),
+      autonomy_pause_on_session: Boolean(llmForm.autonomy_pause_on_session),
+      autonomy_pause_on_privesc: Boolean(llmForm.autonomy_pause_on_privesc),
+      autonomy_max_noise: llmForm.autonomy_max_noise || 'high',
     })
   }
 
   function addAllowedCommand(event) {
     event.preventDefault()
-    const next = normalizeCommandAllowlist([...commandAllowlist, commandDraft])
-    if (next.length !== commandAllowlist.length) {
-      updateSetting('commandAllowlist', next)
-    }
+    const nextAllowlist = normalizeCommandAllowlist([...(llmForm.command_allowlist || commandAllowlist), commandDraft])
+    if (nextAllowlist.length === commandAllowlist.length) return
     setCommandDraft('')
+    updateAllowlist(nextAllowlist)
   }
 
   function removeAllowedCommand(commandName) {
-    updateSetting('commandAllowlist', commandAllowlist.filter((item) => item !== commandName))
+    updateAllowlist((llmForm.command_allowlist || commandAllowlist).filter((item) => item !== commandName))
   }
 
   return (
@@ -206,9 +238,9 @@ export function SettingsView({ apiBase, setApiBase, uiSettings, setUiSettings, r
               {
                 id: 'raw-command-allowlist',
                 label: 'View raw allowlist',
-                description: 'Inspect the persisted backend allowlist and defaults.',
-                onSelect: () => openJson('Command allowlist', { commandAllowlist, defaults: DEFAULT_COMMAND_ALLOWLIST }, {
-                  description: 'These names are stored in backend runtime settings and can auto-run matching non-install commands.',
+                description: 'Inspect the live allowlist returned by backend runtime settings.',
+                onSelect: () => openJson('Command allowlist', { commandAllowlist, defaults: DEFAULT_COMMAND_ALLOWLIST, source: allowlistSource }, {
+                  description: 'This is the current runtime allowlist the backend uses for routine non-install commands.',
                 }),
               },
             ]}
@@ -220,19 +252,23 @@ export function SettingsView({ apiBase, setApiBase, uiSettings, setUiSettings, r
             Command name
             <input value={commandDraft} onChange={(event) => setCommandDraft(event.target.value)} placeholder="curl" />
           </label>
-          <button className="primary" type="submit" disabled={!normalizeCommandAllowlist([commandDraft]).length}>Add Command</button>
-          <button type="button" onClick={() => updateSetting('commandAllowlist', DEFAULT_COMMAND_ALLOWLIST)}>Restore Defaults</button>
+          <button className="primary" type="submit" disabled={!normalizeCommandAllowlist([commandDraft]).length || loading}>Add Command</button>
+          <button type="button" disabled={loading} onClick={() => updateAllowlist(DEFAULT_COMMAND_ALLOWLIST)}>Restore Defaults</button>
         </form>
+        <dl className="settings-list">
+          <div><dt>Source</dt><dd>{allowlistSource}</dd></div>
+          <div><dt>Commands</dt><dd>{commandAllowlist.length}</dd></div>
+        </dl>
         <div className="allowlist-chip-grid">
           {commandAllowlist.map((commandName) => (
             <span className="allowlist-chip" key={commandName}>
               <span>{commandName}</span>
               <em>auto-allowed/default</em>
-              <button type="button" aria-label={`Remove ${commandName}`} onClick={() => removeAllowedCommand(commandName)}>Remove</button>
+              <button type="button" aria-label={`Remove ${commandName}`} disabled={loading} onClick={() => removeAllowedCommand(commandName)}>Remove</button>
             </span>
           ))}
         </div>
-        <SupportWhy title="Ask why" body="The allowlist is persisted by the backend for routine command names. Matching non-install commands can auto-run, missing binaries still report command-not-found output, and software installation remains approval-gated." />
+        <SupportWhy title="Ask why" body="The backend owns this allowlist and uses it to auto-approve routine non-install commands. Changes here are persisted through runtime settings, while install-like and dangerous commands remain approval-gated regardless of allowlist membership." />
       </Panel>
 
       <Panel
@@ -348,9 +384,38 @@ export function SettingsView({ apiBase, setApiBase, uiSettings, setUiSettings, r
             Max actions per turn
             <input type="number" min="1" max="10" value={llmForm.autoplan_max_actions_per_turn || 4} onChange={(event) => updateLlmForm('autoplan_max_actions_per_turn', event.target.value)} />
           </label>
+          <label>
+            Autonomy profile
+            <select value={llmForm.autonomy_profile || 'through_privesc'} onChange={(event) => updateLlmForm('autonomy_profile', event.target.value)}>
+              <option value="recon_only">Recon only</option>
+              <option value="through_foothold">Through foothold</option>
+              <option value="through_privesc">Through privesc</option>
+            </select>
+          </label>
+          <label>
+            Max noise
+            <select value={llmForm.autonomy_max_noise || 'high'} onChange={(event) => updateLlmForm('autonomy_max_noise', event.target.value)}>
+              <option value="safe">Safe only</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+            </select>
+          </label>
           <label className="checkbox-line">
             <input type="checkbox" checked={Boolean(llmForm.autoplan_enabled)} onChange={(event) => updateLlmForm('autoplan_enabled', event.target.checked)} />
             Run autonomous planner loop
+          </label>
+          <label className="checkbox-line">
+            <input type="checkbox" checked={Boolean(llmForm.autonomy_pause_on_credential)} onChange={(event) => updateLlmForm('autonomy_pause_on_credential', event.target.checked)} />
+            Pause on first credential
+          </label>
+          <label className="checkbox-line">
+            <input type="checkbox" checked={Boolean(llmForm.autonomy_pause_on_session)} onChange={(event) => updateLlmForm('autonomy_pause_on_session', event.target.checked)} />
+            Pause on first session
+          </label>
+          <label className="checkbox-line">
+            <input type="checkbox" checked={Boolean(llmForm.autonomy_pause_on_privesc)} onChange={(event) => updateLlmForm('autonomy_pause_on_privesc', event.target.checked)} />
+            Pause on privesc transition
           </label>
           <label className="checkbox-line">
             <input type="checkbox" checked={Boolean(llmForm.autoplan_include_execution_history)} onChange={(event) => updateLlmForm('autoplan_include_execution_history', event.target.checked)} />
@@ -384,6 +449,23 @@ export function SettingsView({ apiBase, setApiBase, uiSettings, setUiSettings, r
           <div><dt>Planner log</dt><dd>{llmPlanner?.planner_log_path || 'not created yet'}</dd></div>
         </dl>
         <SupportWhy title="Ask why" body="These settings control which model endpoint Mission Control uses, how much context is sent, and whether the autonomous planner periodically feeds prior jobs, actions, and results back into the LLM to queue fresh approval-gated actions." />
+      </Panel>
+
+      <Panel title="Tool Catalog" className="wide">
+        <div className="service-table">
+          <div className="table-header"><span>Tool</span><span>Family</span><span>Installed</span><span>Path</span><span>Summary</span><span>Actions</span></div>
+          {(toolCatalog?.tools || []).map((tool) => (
+            <div className="table-row" key={tool.name}>
+              <strong>{tool.name}</strong>
+              <span>{tool.family}</span>
+              <em className={tool.installed ? 'badge good' : 'badge danger'}>{tool.installed ? 'yes' : 'no'}</em>
+              <span>{cleanDisplayText(tool.path, 'not found')}</span>
+              <span>{cleanDisplayText(tool.summary, 'No summary')}</span>
+              <button type="button" onClick={() => openJson(`Tool ${tool.name}`, tool, { description: 'Tool metadata and installation status.' })}>View raw</button>
+            </div>
+          ))}
+        </div>
+        {!(toolCatalog?.tools || []).length ? <EmptyState title="No tool catalog" body="Tool availability has not loaded yet." /> : null}
       </Panel>
 
       <Panel

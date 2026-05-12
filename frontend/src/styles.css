@@ -1014,6 +1014,7 @@ label {
 
 .target-list,
 .credential-list,
+.shell-view,
 .team-grid,
 .settings-list,
 .report-layout,
@@ -1079,6 +1080,62 @@ label {
   color: #26ffd6;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.shell-connect-form {
+  display: grid;
+  grid-template-columns: minmax(13rem, 1.4fr) minmax(8rem, 0.7fr) minmax(11rem, 1fr) 6.5rem minmax(8rem, 0.8fr) minmax(8rem, 0.8fr) auto auto;
+  gap: 0.7rem;
+  align-items: end;
+}
+
+.shell-connect-form label {
+  min-width: 0;
+}
+
+.shell-connect-form input,
+.shell-connect-form select {
+  width: 100%;
+}
+
+.shell-status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.5rem;
+  margin-top: 0.8rem;
+}
+
+.shell-status-grid span {
+  padding: 0.45rem 0.55rem;
+  border: 1px solid rgba(107, 160, 176, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+  color: #aab4b7;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+}
+
+.shell-hint {
+  margin: 0.7rem 0 0;
+  color: #aab4b7;
+}
+
+.xterm-frame {
+  height: min(62vh, 44rem);
+  min-height: 28rem;
+  padding: 0.75rem;
+  border: 1px solid rgba(0, 229, 255, 0.22);
+  border-radius: 8px;
+  background: #020707;
+  overflow: hidden;
+}
+
+.xterm-frame .xterm {
+  height: 100%;
+}
+
+.error-banner.compact {
+  margin-top: 0.75rem;
 }
 
 .prompt-stack article,
@@ -1185,6 +1242,11 @@ label {
   border: 1px solid rgba(56, 255, 46, 0.22);
   border-radius: 999px;
   background: rgba(56, 255, 46, 0.07);
+}
+
+.allowlist-chip.read-only {
+  grid-template-columns: auto auto;
+  padding-right: 0.7rem;
 }
 
 .allowlist-chip span {
@@ -1783,6 +1845,10 @@ label {
     grid-template-columns: 1fr;
   }
 
+  .shell-connect-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .mission-card,
   .target-card {
     grid-column: span 2;
@@ -1851,9 +1917,16 @@ label {
   .mission-charts,
   .metric-grid,
   .compact-metrics,
+  .shell-connect-form,
+  .shell-status-grid,
   .team-grid {
     flex-direction: column;
     grid-template-columns: 1fr;
+  }
+
+  .xterm-frame {
+    min-height: 22rem;
+    height: 58vh;
   }
 
   .allowlist-editor {

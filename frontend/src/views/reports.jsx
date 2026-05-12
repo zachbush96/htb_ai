@@ -114,11 +114,34 @@ export function ReportsView({ reports, activeTarget, targetReport }) {
                   <Metric label="Findings" value={activeReport.counts.findings} tone="warn" />
                   <Metric label="Observations" value={activeReport.counts.observations} />
                   <Metric label="Completed" value={activeReport.counts.completed_actions} tone="good" />
+                  <Metric label="Credentials" value={activeReport.counts.credentials || 0} tone={(activeReport.counts.credentials || 0) ? 'warn' : 'info'} />
+                  <Metric label="Sessions" value={activeReport.counts.sessions || 0} tone={(activeReport.counts.sessions || 0) ? 'good' : 'info'} />
                 </div>
               </div>
               <BarChart rows={severityRows} />
             </div>
           ) : <EmptyState title="No report selected" body="Select or create a target to populate detailed reports." />}
+        </Panel>
+
+        <Panel title="Best Path" meta={activeReport?.best_path?.next_objective || activeReport?.objective_phase || 'pending'} className="wide">
+          {activeReport?.best_path ? (
+            <div className="report-layout">
+              <div>
+                <h2>{cleanDisplayText(activeReport.best_path.label, 'No best path')}</h2>
+                <p>{cleanDisplayText(activeReport.best_path.why, 'No path rationale stored.')}</p>
+              </div>
+              <div className="context-preview">
+                <article>
+                  <strong>Confidence</strong>
+                  <span>{cleanDisplayText(activeReport.best_path.confidence, 'candidate')}</span>
+                </article>
+                <article>
+                  <strong>Next objective</strong>
+                  <span>{cleanDisplayText(activeReport.best_path.next_objective, 'pending')}</span>
+                </article>
+              </div>
+            </div>
+          ) : <EmptyState title="No best path" body="The backend will promote the strongest current path when enough evidence exists." />}
         </Panel>
 
         <Panel
