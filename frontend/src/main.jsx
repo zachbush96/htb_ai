@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
-import { buildExecutionItems, executionIsActive, executionKey, findCredentialHints, inferDefaultApiBase, loadUiSettings, NAV_ITEMS, normalizeError, sortApprovalQueue } from './lib/app-utils'
+import { buildExecutionItems, cleanSummaryText, executionIsActive, executionKey, findCredentialHints, inferDefaultApiBase, loadUiSettings, NAV_ITEMS, normalizeError, sortApprovalQueue } from './lib/app-utils'
 import { ConversationView } from './views/conversation'
 import { DashboardView } from './views/dashboard'
 import { TargetsView } from './views/targets'
@@ -27,9 +27,11 @@ function App() {
   const [backendHealth, setBackendHealth] = useState(null)
   const [runtimeSettings, setRuntimeSettings] = useState(null)
   const [diagnostics, setDiagnostics] = useState(null)
+  const [modelCatalog, setModelCatalog] = useState(null)
   const [reports, setReports] = useState(null)
   const [targetReport, setTargetReport] = useState(null)
   const [llmPrompts, setLlmPrompts] = useState(null)
+  const [llmPlanner, setLlmPlanner] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [selectedExecutionKey, setSelectedExecutionKey] = useState(null)
@@ -79,20 +81,52 @@ function App() {
     return json
   }
 
+  async function refreshModelCatalog() {
+    try {
+      const payload = await request('/api/settings/models')
+      setModelCatalog(payload.model_catalog)
+      return payload.model_catalog
+    } catch (err) {
+      const fallback = {
+        configured: false,
+        reachable: false,
+        base_url: null,
+        endpoint: null,
+        models: [],
+        error: normalizeError(err),
+      }
+      setModelCatalog(fallback)
+      return fallback
+    }
+  }
+
   async function refreshEverything(preferredTargetId = activeTargetId) {
     try {
-      const [health, targetList, settingsPayload, reportPayload, promptPayload] = await Promise.all([
+      const [health, targetList, settingsPayload, modelPayload, reportPayload, promptPayload, plannerPayload] = await Promise.all([
         request('/healthz'),
         request('/api/targets'),
         request('/api/settings'),
+        request('/api/settings/models').catch((err) => ({
+          model_catalog: {
+            configured: false,
+            reachable: false,
+            base_url: null,
+            endpoint: null,
+            models: [],
+            error: normalizeError(err),
+          },
+        })),
         request('/api/reports/overview'),
         request('/api/llm/prompts'),
+        request('/api/llm/planner'),
       ])
       setBackendHealth(health)
       setRuntimeSettings(settingsPayload.settings)
       setDiagnostics(settingsPayload)
+      setModelCatalog(modelPayload.model_catalog)
       setReports(reportPayload)
       setLlmPrompts(promptPayload.prompts)
+      setLlmPlanner(plannerPayload.planner)
       setTargets(targetList)
       const nextId = preferredTargetId && targetList.some((item) => item.id === preferredTargetId)
         ? preferredTargetId
@@ -125,6 +159,56 @@ function App() {
       const payload = await request('/api/settings')
       setDiagnostics(payload)
       setRuntimeSettings(payload.settings)
+      await refreshModelCatalog()
+    } catch (err) {
+      setError(normalizeError(err))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function updateLlmSettings(nextSettings) {
+    setLoading(true)
+    setError('')
+    try {
+      const payload = await request('/api/settings/llm', {
+        method: 'POST',
+        body: JSON.stringify(nextSettings),
+      })
+      setDiagnostics(payload)
+      setRuntimeSettings(payload.settings)
+      setModelCatalog(payload.model_catalog)
+      setLlmPlanner(payload.planner)
+      await refreshEverything(activeTargetId)
+    } catch (err) {
+      setError(normalizeError(err))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function setPlannerEnabled(enabled) {
+    setLoading(true)
+    setError('')
+    try {
+      const payload = await request(`/api/llm/planner/${enabled ? 'start' : 'stop'}`, { method: 'POST' })
+      setRuntimeSettings(payload.settings)
+      setLlmPlanner(payload.planner)
+      await refreshEverything(activeTargetId)
+    } catch (err) {
+      setError(normalizeError(err))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function runPlannerStep() {
+    if (!activeTargetId) return
+    setLoading(true)
+    setError('')
+    try {
+      await request(`/api/targets/${activeTargetId}/planner/step`, { method: 'POST' })
+      await refreshEverything(activeTargetId)
     } catch (err) {
       setError(normalizeError(err))
     } finally {
@@ -321,11 +405,14 @@ function App() {
   const observations = activeTarget?.observations || []
   const timeline = [...(activeTarget?.timeline || [])].reverse()
   const approvalQueue = sortApprovalQueue(actions.filter((item) => item.status === 'pending_approval' || item.status === 'blocked'))
+  const commandAllowlist = uiSettings.commandAllowlist
   const completedActions = actions.filter((item) => ['completed', 'failed', 'stopped'].includes(item.status))
   const runningJobs = (activeTarget?.jobs || []).filter((job) => ['running', 'queued', 'stopping'].includes(job.status))
   const executionItems = buildExecutionItems(activeTarget)
+  const activeExecutionCount = executionItems.filter(executionIsActive).length
   const selectedExecution = executionItems.find((item) => executionKey(item) === selectedExecutionKey) || executionItems[0] || null
   const viewTitle = NAV_ITEMS.find((item) => item.id === activeView)?.label || 'Dashboard'
+  const headerSummary = cleanSummaryText(activeTarget?.latest_summary, 'Mission status and target overview')
 
   useEffect(() => {
     if (!executionItems.length) {
@@ -348,12 +435,12 @@ function App() {
   const navCounts = useMemo(() => ({
     conversation: activeTarget?.conversation?.length || 0,
     approvals: approvalQueue.length,
-    jobs: runningJobs.length,
+    jobs: activeExecutionCount,
     reports: reports?.totals?.findings || 0,
     targets: targets.length,
     loot: observations.length,
     credentials: findCredentialHints(activeTarget).length,
-  }), [activeTarget, approvalQueue.length, runningJobs.length, reports, targets.length, observations.length])
+  }), [activeTarget, activeExecutionCount, approvalQueue.length, reports, targets.length, observations.length])
 
   function renderView() {
     if (!activeTarget && !['targets', 'reports', 'settings', 'team'].includes(activeView)) {
@@ -389,18 +476,22 @@ function App() {
           setContextForm={setContextForm}
           addContextBlock={addContextBlock}
           removeContextBlock={removeContextBlock}
+          llmPlanner={llmPlanner}
+          runPlannerStep={runPlannerStep}
+          setPlannerEnabled={setPlannerEnabled}
+          commandAllowlist={commandAllowlist}
         />
       )
     }
     if (activeView === 'targets') return <TargetsView targets={targets} activeTargetId={activeTargetId} setActiveTargetId={setActiveTargetId} deleteTarget={deleteTarget} loading={loading} />
     if (activeView === 'timeline') return <TimelinePanel entries={[...timeline, ...logs.slice().reverse()]} className="full-view" />
-    if (activeView === 'approvals') return <ApprovalsPanel approvalQueue={approvalQueue} loading={loading} decideAction={decideAction} removeAction={removeAction} />
-    if (activeView === 'jobs') return <JobsPanel activeTarget={activeTarget} selectedExecutionKey={selectedExecutionKey} setSelectedExecutionKey={setSelectedExecutionKey} stopExecution={stopExecution} loading={loading} />
+    if (activeView === 'approvals') return <ApprovalsPanel approvalQueue={approvalQueue} loading={loading} decideAction={decideAction} removeAction={removeAction} commandAllowlist={commandAllowlist} />
+    if (activeView === 'jobs') return <JobsPanel activeTarget={activeTarget} selectedExecutionKey={selectedExecutionKey} setSelectedExecutionKey={setSelectedExecutionKey} stopExecution={stopExecution} loading={loading} commandAllowlist={commandAllowlist} />
     if (activeView === 'loot') return <LootView activeTarget={activeTarget} />
     if (activeView === 'credentials') return <CredentialsView activeTarget={activeTarget} />
     if (activeView === 'reports') return <ReportsView reports={reports} activeTarget={activeTarget} targetReport={targetReport} />
     if (activeView === 'team') return <TeamView backendHealth={backendHealth} />
-    if (activeView === 'settings') return <SettingsView apiBase={apiBase} setApiBase={setApiBase} uiSettings={uiSettings} setUiSettings={setUiSettings} runtimeSettings={runtimeSettings} diagnostics={diagnostics} testSettings={testSettings} llmPrompts={llmPrompts} />
+    if (activeView === 'settings') return <SettingsView apiBase={apiBase} setApiBase={setApiBase} uiSettings={uiSettings} setUiSettings={setUiSettings} runtimeSettings={runtimeSettings} diagnostics={diagnostics} modelCatalog={modelCatalog} refreshModelCatalog={refreshModelCatalog} testSettings={testSettings} llmPrompts={llmPrompts} llmPlanner={llmPlanner} updateLlmSettings={updateLlmSettings} setPlannerEnabled={setPlannerEnabled} loading={loading} />
 
     return (
       <DashboardView
@@ -423,6 +514,7 @@ function App() {
         selectedExecutionKey={selectedExecutionKey}
         setSelectedExecutionKey={setSelectedExecutionKey}
         stopExecution={stopExecution}
+        commandAllowlist={commandAllowlist}
       />
     )
   }
@@ -457,7 +549,7 @@ function App() {
         <header className="topbar">
           <div>
             <h1>{viewTitle}</h1>
-            <p>{activeTarget?.latest_summary || 'Mission status and target overview'}</p>
+            <p>{headerSummary}</p>
           </div>
           <div className="topbar-actions">
             <span className="badge good">

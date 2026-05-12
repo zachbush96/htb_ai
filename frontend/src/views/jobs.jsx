@@ -1,13 +1,15 @@
 import React from 'react'
-import { badgeClass, buildExecutionItems, cleanDisplayText, executionIsActive, executionKey, executionStatusCopy, formatBytes, formatDateTime, formatRelativeTime, formatTime } from '../lib/app-utils'
+import { badgeClass, buildExecutionItems, cleanDisplayText, commandIsAllowlisted, commandLooksLikeInstall, commandNameFromItem, executionExitLabel, executionIsActive, executionKey, executionStatusCopy, formatBytes, formatDateTime, formatRelativeTime, formatTime } from '../lib/app-utils'
 import { EmptyState, Panel } from '../components/primitives'
 import { buildWhyItems, extractArtifactPath, extractDetectedVersion, extractFirstUrl, openInBrowser, OpsActionMenu, OpsCopyNote, OpsMetaGrid, OpsRawBlock, OpsWhyList, safeSerialize } from './ops-actions'
 
-function ExecutionActions({ item, condensed = false }) {
+function ExecutionActions({ item, condensed = false, commandAllowlist }) {
   const browserUrl = extractFirstUrl(item.command, item.result_excerpt, item.live_output_tail, item.error)
   const artifactPath = extractArtifactPath(item)
   const detectedVersion = extractDetectedVersion(item.result_excerpt, item.live_output_tail, item.parse_summary, item.summary)
   const rawOutput = item.live_output_tail || item.result_excerpt || item.error || 'No output captured yet.'
+  const allowlisted = commandIsAllowlisted(item, commandAllowlist)
+  const installGated = commandLooksLikeInstall(item)
 
   return (
     <OpsActionMenu
@@ -22,6 +24,8 @@ function ExecutionActions({ item, condensed = false }) {
             <>
               <OpsWhyList items={buildWhyItems(item, [
                 executionStatusCopy(item),
+                allowlisted ? `${commandNameFromItem(item)} is on the operator command allowlist and is shown as auto-allowed/default.` : '',
+                installGated ? 'Software installation remains approval-gated in the queue before execution.' : '',
                 item.output_path ? 'An artifact path has been recorded for this execution.' : '',
                 condensed ? 'This execution is shown inside the condensed live monitor.' : '',
               ])} />
@@ -29,7 +33,8 @@ function ExecutionActions({ item, condensed = false }) {
                 { label: 'Execution kind', value: item.category_label || item.execution_kind || 'unknown' },
                 { label: 'Status', value: item.status || 'unknown' },
                 { label: 'PID', value: item.pid || 'n/a' },
-                { label: 'Exit', value: item.return_code ?? item.termination_reason ?? 'running' },
+                { label: 'Exit', value: executionExitLabel(item) },
+                { label: 'Allowlist', value: allowlisted ? 'auto-allowed/default' : 'manual review' },
               ]} />
             </>
           ),
@@ -109,7 +114,7 @@ function ExecutionActions({ item, condensed = false }) {
   )
 }
 
-export function JobsPanel({ activeTarget, selectedExecutionKey, setSelectedExecutionKey, stopExecution, loading, condensed = false }) {
+export function JobsPanel({ activeTarget, selectedExecutionKey, setSelectedExecutionKey, stopExecution, loading, condensed = false, commandAllowlist }) {
   const executionItems = buildExecutionItems(activeTarget)
   const selectedItem = executionItems.find((item) => executionKey(item) === selectedExecutionKey) || executionItems[0] || null
   const activeCount = executionItems.filter(executionIsActive).length
@@ -129,6 +134,10 @@ export function JobsPanel({ activeTarget, selectedExecutionKey, setSelectedExecu
                 <div>
                   <strong>{cleanDisplayText(item.title, 'Execution')}</strong>
                   <span>{item.category_label} · {cleanDisplayText(item.detail, 'No detail recorded.')}</span>
+                  <span className="execution-chip-row">
+                    {commandIsAllowlisted(item, commandAllowlist) ? <small className="stage-chip good">auto-allowed: {commandNameFromItem(item)}</small> : null}
+                    {commandLooksLikeInstall(item) ? <small className="stage-chip danger">install approval required</small> : null}
+                  </span>
                 </div>
                 <em className={badgeClass(item.status)}>{item.status}</em>
                 <small>{formatTime(item.started_at || item.created_at)}</small>
@@ -163,12 +172,12 @@ export function JobsPanel({ activeTarget, selectedExecutionKey, setSelectedExecu
                 <div><dt>Last output</dt><dd>{selectedItem.last_output_at ? formatRelativeTime(selectedItem.last_output_at) : 'none yet'}</dd></div>
                 <div><dt>Captured</dt><dd>{formatBytes(selectedItem.output_bytes)}</dd></div>
                 <div><dt>Artifact</dt><dd>{cleanDisplayText(selectedItem.output_path, 'not written yet')}</dd></div>
-                <div><dt>Exit</dt><dd>{selectedItem.return_code ?? selectedItem.termination_reason ?? 'running'}</dd></div>
+                <div><dt>Exit</dt><dd>{executionExitLabel(selectedItem)}</dd></div>
               </dl>
 
               <code className="command-line">{selectedItem.command || 'No command recorded.'}</code>
               <pre className="console-tail">{selectedItem.live_output_tail || selectedItem.result_excerpt || selectedItem.error || 'No output captured yet.'}</pre>
-              <ExecutionActions item={selectedItem} condensed={condensed} />
+              <ExecutionActions item={selectedItem} condensed={condensed} commandAllowlist={commandAllowlist} />
 
               {!condensed ? (
                 <div className="execution-notes">

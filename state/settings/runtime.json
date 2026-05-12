@@ -1,0 +1,27 @@
+{
+  "ollama_base_url": null,
+  "ollama_tailscale_host": "100.102.78.116",
+  "ollama_timeout_seconds": 60.0,
+  "default_model": "llama3.2:3b",
+  "temperature": 0.2,
+  "num_ctx": 8192,
+  "autoplan_enabled": false,
+  "autoplan_interval_seconds": 20,
+  "autoplan_max_actions_per_turn": 4,
+  "autoplan_include_timeline": true,
+  "autoplan_include_execution_history": true,
+  "autoplan_prompt": "Continue autonomously using the HTB methodology. Feed in the prior jobs, actions, results, and pending queue. Propose only the next smallest useful approval-gated terminal actions. Do not repeat commands that already failed unless the command is corrected and the correction is explicit. Do not invent local wordlist paths; if a needed file path is unknown, first propose a small discovery command. Return concise reasoning and a JSON object with proposed_actions, where each action has label, command, reason, risk, stage, and parser.",
+  "system_prompt": null,
+  "command_allowlist": [
+    "curl",
+    "nmap",
+    "ffuf",
+    "gobuster",
+    "dirb",
+    "smbclient",
+    "enum4linux",
+    "nikto",
+    "whatweb",
+    "wget"
+  ]
+}

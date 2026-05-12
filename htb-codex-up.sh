@@ -40,15 +40,16 @@ TS_AUTHKEY=""
 # Optional. Only needed if you want API-key fallback instead of interactive ChatGPT login.
 OPENAI_API_KEY=""
 
-# Repo defaults.
-BOOTSTRAP_REPO="zachbush96/htb"
+# Repo defaults. This project is htb_ai; change only if you intentionally keep
+# your bootstrap installer in a different private repo.
+BOOTSTRAP_REPO="zachbush96/htb_ai"
 BOOTSTRAP_BRANCH="main"
 EOF
   chmod 600 "$ENV_FILE" 2>/dev/null || true
   die "Created $ENV_FILE. Fill in GITHUB_TOKEN and TS_AUTHKEY, then rerun."
 fi
 
-: "${BOOTSTRAP_REPO:=zachbush96/htb}"
+: "${BOOTSTRAP_REPO:=zachbush96/htb_ai}"
 : "${BOOTSTRAP_BRANCH:=main}"
 : "${GITHUB_TOKEN:?Missing GITHUB_TOKEN in $ENV_FILE}"
 
@@ -78,4 +79,3 @@ export ENV_FILE
 bash ./install.sh
 
 log "Done. Try: htb-codex"
-

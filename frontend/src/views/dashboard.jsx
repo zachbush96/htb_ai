@@ -96,7 +96,7 @@ function ExecutionPanel({ completedActions, actionRuntime }) {
   )
 }
 
-export function DashboardView({ activeTarget, backendHealth, latestJob, services, findings, approvalQueue, recommendations, observations, logs, timeline, completedActions, runningJobs, loading, rerunEnumeration, decideAction, removeAction, selectedExecutionKey, setSelectedExecutionKey, stopExecution }) {
+export function DashboardView({ activeTarget, backendHealth, latestJob, services, findings, approvalQueue, recommendations, observations, logs, timeline, completedActions, runningJobs, loading, rerunEnumeration, decideAction, removeAction, selectedExecutionKey, setSelectedExecutionKey, stopExecution, commandAllowlist }) {
   const actionRuntime = useActionRuntime()
   const riskScore = Math.min(99, 35 + findings.length * 12 + approvalQueue.length * 9 + services.length * 3)
   const targetName = activeTarget?.display_name || activeTarget?.ip_address || 'No active target'
@@ -333,8 +333,8 @@ export function DashboardView({ activeTarget, backendHealth, latestJob, services
           ) : <EmptyState title="No recommendations" body="Recommendations will populate after service discovery." />}
         </Panel>
 
-        <ApprovalsPanel approvalQueue={approvalQueue} loading={loading} decideAction={decideAction} removeAction={removeAction} />
-        <JobsPanel activeTarget={activeTarget} selectedExecutionKey={selectedExecutionKey} setSelectedExecutionKey={setSelectedExecutionKey} stopExecution={stopExecution} loading={loading} condensed />
+        <ApprovalsPanel approvalQueue={approvalQueue} loading={loading} decideAction={decideAction} removeAction={removeAction} commandAllowlist={commandAllowlist} />
+        <JobsPanel activeTarget={activeTarget} selectedExecutionKey={selectedExecutionKey} setSelectedExecutionKey={setSelectedExecutionKey} stopExecution={stopExecution} loading={loading} condensed commandAllowlist={commandAllowlist} />
         <FindingsPanel findings={findings} observations={observations} actionRuntime={actionRuntime} />
 
         <Panel

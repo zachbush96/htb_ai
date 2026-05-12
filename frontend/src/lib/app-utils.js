@@ -12,11 +12,25 @@ export const NAV_ITEMS = [
   { id: 'settings', label: 'Settings', icon: 'ST' },
 ]
 
+export const DEFAULT_COMMAND_ALLOWLIST = [
+  'curl',
+  'nmap',
+  'ffuf',
+  'gobuster',
+  'dirb',
+  'smbclient',
+  'enum4linux',
+  'nikto',
+  'whatweb',
+  'wget',
+]
+
 export const DEFAULT_SETTINGS = {
   refreshSeconds: 4,
   chartMode: 'counts',
   tableDensity: 'comfortable',
   autoSelectLatest: true,
+  commandAllowlist: DEFAULT_COMMAND_ALLOWLIST,
 }
 
 export function inferDefaultApiBase() {
@@ -28,10 +42,42 @@ export function inferDefaultApiBase() {
 
 export function loadUiSettings() {
   try {
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(window.localStorage.getItem('htbmc-ui-settings') || '{}') }
+    const stored = JSON.parse(window.localStorage.getItem('htbmc-ui-settings') || '{}')
+    return {
+      ...DEFAULT_SETTINGS,
+      ...stored,
+      commandAllowlist: normalizeCommandAllowlist(stored.commandAllowlist || DEFAULT_SETTINGS.commandAllowlist),
+    }
   } catch {
     return DEFAULT_SETTINGS
   }
+}
+
+export function normalizeCommandAllowlist(commands = []) {
+  return [...new Set((Array.isArray(commands) ? commands : [])
+    .map((item) => String(item || '').trim().toLowerCase())
+    .filter((item) => /^[a-z0-9][a-z0-9._+-]*$/.test(item)))]
+    .sort((left, right) => left.localeCompare(right))
+}
+
+export function commandNameFromItem(item) {
+  const explicit = cleanDisplayText(item?.binary || '', '')
+  if (explicit) return explicit.split(/[\/\s]+/).filter(Boolean).pop().toLowerCase()
+  const command = cleanDisplayText(item?.command || '', '')
+  const match = command.match(/^\s*(?:sudo\s+)?(?:env\s+)?([^\s]+)/i)
+  if (!match) return ''
+  return match[1].split('/').filter(Boolean).pop().toLowerCase()
+}
+
+export function commandIsAllowlisted(item, allowlist = DEFAULT_COMMAND_ALLOWLIST) {
+  const commandName = commandNameFromItem(item)
+  return Boolean(commandName && normalizeCommandAllowlist(allowlist).includes(commandName))
+}
+
+export function commandLooksLikeInstall(item) {
+  const text = cleanDisplayText(`${item?.label || ''} ${item?.reason || ''} ${item?.command || ''}`, '').toLowerCase()
+  return /\b(apt|apt-get|apk|yum|dnf|brew|pip3?|npm|pnpm|yarn|gem)\s+(?:.*\s)?install\b/.test(text)
+    || /\binstall(?:ing|ation)?\b/.test(text)
 }
 
 export function badgeClass(value) {
@@ -151,6 +197,16 @@ export function cleanDisplayText(value, fallback = '') {
   return text || fallback
 }
 
+export function cleanSummaryText(value, fallback = '') {
+  const text = cleanDisplayText(value, fallback)
+    .replace(/(?:(?<=\s)|(?<=^))\/(?:(?=\s)|(?=$))/g, '. ')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+  const parts = text.split(/\.\s+/).map((part) => part.trim()).filter(Boolean)
+  const deduped = parts.filter((part, index) => index === 0 || part.toLowerCase() !== parts[index - 1].toLowerCase())
+  return deduped.join('. ') || fallback
+}
+
 export function buildExecutionItems(activeTarget) {
   const jobs = (activeTarget?.jobs || []).map((job) => ({
     ...job,
@@ -197,6 +253,16 @@ export function executionStatusCopy(item) {
   if (item.status === 'completed') return 'Completed successfully.'
   if (item.status === 'failed') return 'Exited with an error.'
   return cleanDisplayText(item.status, 'unknown state')
+}
+
+export function executionExitLabel(item) {
+  if (!item) return 'n/a'
+  if (item.return_code !== null && item.return_code !== undefined) return item.return_code
+  if (item.termination_reason) return item.termination_reason
+  if (item.status === 'completed') return 0
+  if (item.status === 'stopped') return 'stopped'
+  if (item.status === 'failed') return 'error'
+  return 'running'
 }
 
 export function findCredentialHints(activeTarget) {

@@ -1,15 +1,12 @@
-#!/usr/bin/env bash
-set -euo pipefail
-if [ -f .env ]; then source .env; fi
-STATE_DIR="${HTBMC_STATE_DIR:-$HOME/my_data/htb-mission-control-state}"
-STATE_DIR="$(eval echo "$STATE_DIR")"
-REMOTE="${HTBMC_STATE_GIT_REMOTE:-}"
-mkdir -p "$STATE_DIR"
-cd "$STATE_DIR"
-git init
-if [ -n "$REMOTE" ] && ! git remote | grep -q '^origin$'; then
-  git remote add origin "$REMOTE"
-fi
-git add . || true
-git commit -m "initial state" || true
-echo "State repo ready at $STATE_DIR"
+# Legacy State Repo Note
+
+This file used to contain a shell snippet for initializing the runtime state directory as a Git repo.
+
+Current state guidance:
+
+- Runtime state defaults to `./state` through `env.example`.
+- `HTBMC_STATE_DIR` can move state to another folder.
+- Generated state may contain target evidence, command output, prompt logs, and operational notes.
+- Do not commit sensitive runtime state unless you intentionally curated it as a fixture.
+
+See [state/README.md](./state/README.md) for the current state layout.

@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
+# Start only the FastAPI backend. Pair this with scripts/run_frontend.sh for the
+# browser UI. Runtime state is controlled by HTBMC_STATE_DIR, defaulting to
+# ./state through env.example.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 

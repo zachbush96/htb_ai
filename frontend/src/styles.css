@@ -1,6 +1,8 @@
 :root {
+  --font-display: "Avenir Next Condensed", "DIN Condensed", "Avenir Next", "Segoe UI", sans-serif;
+  --font-body: "Avenir Next", "Segoe UI", sans-serif;
   color-scheme: dark;
-  font-family: "Avenir Next Condensed", "DIN Condensed", "Avenir Next", "Segoe UI", sans-serif;
+  font-family: var(--font-display);
   background: #02080d;
   color: #f4f7f4;
   font-synthesis: none;
@@ -27,6 +29,12 @@ input,
 select,
 textarea {
   font: inherit;
+}
+
+p {
+  font-family: var(--font-body);
+  letter-spacing: 0.01em;
+  line-height: 1.5;
 }
 
 button {
@@ -268,6 +276,7 @@ pre {
 .topbar p {
   margin: 0.25rem 0 0;
   font-size: 1.05rem;
+  max-width: min(72rem, 100%);
 }
 
 .topbar-actions {
@@ -835,6 +844,18 @@ label {
   color: #aebac0;
 }
 
+.stage-chip.good {
+  border-color: rgba(56, 255, 46, 0.28);
+  background: rgba(56, 255, 46, 0.08);
+  color: #8dff85;
+}
+
+.stage-chip.danger {
+  border-color: rgba(255, 76, 69, 0.3);
+  background: rgba(255, 76, 69, 0.09);
+  color: #ff8b86;
+}
+
 .approval-mindset {
   color: #aab4b7;
   line-height: 1.45;
@@ -1130,6 +1151,92 @@ label {
   display: flex;
   gap: 0.65rem;
   margin: 0.8rem 0;
+  flex-wrap: wrap;
+}
+
+.allowlist-editor {
+  display: grid;
+  grid-template-columns: minmax(14rem, 1fr) auto auto;
+  gap: 0.75rem;
+  align-items: end;
+  margin-bottom: 0.9rem;
+}
+
+.allowlist-editor label {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+}
+
+.allowlist-chip-grid,
+.execution-chip-row {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.allowlist-chip {
+  display: inline-grid;
+  grid-template-columns: auto auto auto;
+  gap: 0.55rem;
+  align-items: center;
+  padding: 0.36rem 0.45rem 0.36rem 0.7rem;
+  border: 1px solid rgba(56, 255, 46, 0.22);
+  border-radius: 999px;
+  background: rgba(56, 255, 46, 0.07);
+}
+
+.allowlist-chip span {
+  color: #f5fff7;
+  font-family: "SFMono-Regular", "Consolas", monospace;
+}
+
+.allowlist-chip em {
+  color: #8dff85;
+  font-size: 0.72rem;
+  font-style: normal;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.allowlist-chip button {
+  padding: 0.28rem 0.48rem;
+  border-color: rgba(255, 255, 255, 0.13);
+  background: rgba(0, 10, 14, 0.5);
+  font-size: 0.68rem;
+}
+
+.settings-form-grid,
+.planner-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
+.settings-form-grid label {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.settings-form-grid .full-width,
+.button-row.full-width {
+  grid-column: 1 / -1;
+}
+
+.planner-status-grid article {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.85rem;
+  border: 1px solid rgba(0, 229, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(1, 16, 23, 0.62);
+}
+
+.planner-status-grid strong {
+  color: #8fb7bc;
+  font-size: 0.72rem;
+  text-transform: uppercase;
 }
 
 .panel-head-meta {
@@ -1281,9 +1388,14 @@ label {
 
 .conversation-grid {
   display: grid;
-  grid-template-columns: minmax(18rem, 26rem) minmax(0, 1.5fr) minmax(18rem, 24rem);
+  grid-template-columns: minmax(27rem, 0.9fr) minmax(44rem, 1.45fr) minmax(24rem, 0.85fr);
   gap: 1rem;
   align-items: start;
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: visible;
+  padding-bottom: 0.6rem;
+  overscroll-behavior-inline: contain;
 }
 
 .conversation-stack,
@@ -1292,12 +1404,66 @@ label {
   gap: 1rem;
 }
 
+.conversation-stack {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+}
+
+.conversation-stack > .wide {
+  grid-column: 1 / -1;
+}
+
+.conversation-column {
+  min-width: 0;
+  overflow: auto;
+  resize: horizontal;
+  scrollbar-gutter: stable;
+}
+
+.conversation-stack {
+  min-width: 27rem;
+}
+
+.conversation-transcript {
+  min-width: 44rem;
+}
+
+.conversation-rail {
+  min-width: 24rem;
+}
+
+.conversation-column > .panel,
+.conversation-transcript {
+  min-width: min(100%, 22rem);
+}
+
+.conversation-grid .panel-head {
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.conversation-grid .panel-head h3,
+.conversation-grid .panel-head-meta {
+  min-width: 0;
+}
+
+.conversation-grid button {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.conversation-rail .approval-actions {
+  flex-wrap: wrap;
+}
+
 .conversation-hero {
   display: flex;
   justify-content: space-between;
   gap: 1rem;
   align-items: start;
-  overflow: hidden;
+  flex-wrap: wrap;
+  min-width: 0;
+  overflow: auto;
   background:
     radial-gradient(circle at top right, rgba(0, 229, 255, 0.14), transparent 14rem),
     linear-gradient(145deg, rgba(5, 20, 29, 0.96), rgba(2, 11, 16, 0.92));
@@ -1306,18 +1472,20 @@ label {
 .conversation-hero h2 {
   margin: 0.25rem 0 0.6rem;
   font-size: clamp(1.5rem, 2vw, 2.1rem);
+  overflow-wrap: anywhere;
 }
 
 .conversation-hero p {
   margin: 0;
   max-width: 38rem;
   color: #d6e1de;
+  overflow-wrap: anywhere;
 }
 
 .hero-meta {
   display: grid;
   gap: 0.6rem;
-  justify-items: end;
+  justify-items: start;
 }
 
 .context-matrix,
@@ -1357,6 +1525,7 @@ label {
 .snapshot-list article {
   display: grid;
   gap: 0.25rem;
+  min-width: 0;
   padding: 0.8rem 0.9rem;
   border: 1px solid rgba(0, 229, 255, 0.1);
   border-radius: 10px;
@@ -1366,6 +1535,7 @@ label {
 .context-preview span,
 .snapshot-list span {
   color: #aab4b7;
+  overflow-wrap: anywhere;
 }
 
 .context-block-list {
@@ -1378,6 +1548,7 @@ label {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 0.8rem;
+  min-width: 0;
   padding: 0.9rem;
   border: 1px solid rgba(77, 142, 163, 0.18);
   border-radius: 12px;
@@ -1394,6 +1565,7 @@ label {
   grid-template-columns: auto 1fr;
   gap: 0.8rem;
   align-items: start;
+  min-width: 0;
 }
 
 .context-block input {
@@ -1403,6 +1575,7 @@ label {
 .context-block strong,
 .message-card strong {
   display: block;
+  overflow-wrap: anywhere;
 }
 
 .context-block span,
@@ -1418,6 +1591,7 @@ label {
   margin: 0.45rem 0 0;
   white-space: pre-wrap;
   line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .context-editor {
@@ -1437,24 +1611,24 @@ label {
 }
 
 .conversation-transcript {
-  min-height: 76vh;
+  min-height: 0;
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto auto auto;
   gap: 1rem;
 }
 
 .transcript-stream {
-  min-height: 24rem;
-  max-height: 58vh;
+  min-height: 0;
   display: grid;
   gap: 0.9rem;
-  overflow: auto;
-  padding-right: 0.2rem;
+  overflow: visible;
+  padding-right: 0;
 }
 
 .message-card {
   display: grid;
   gap: 0.7rem;
+  min-width: 0;
   padding: 1rem;
   border-radius: 14px;
   border: 1px solid rgba(73, 141, 160, 0.2);
@@ -1477,11 +1651,14 @@ label {
   gap: 0.7rem;
   align-items: center;
   flex-wrap: wrap;
+  min-width: 0;
 }
 
 .message-card pre {
   margin: 0;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   line-height: 1.5;
   color: #edf6f1;
 }
@@ -1503,7 +1680,10 @@ label {
 
 .message-actions article {
   display: grid;
-  gap: 0.55rem;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: start;
+  min-width: 0;
   padding: 0.9rem;
   border-radius: 12px;
   border: 1px solid rgba(255, 196, 0, 0.14);
@@ -1513,6 +1693,7 @@ label {
 .message-actions code,
 .snapshot-list strong {
   word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .chat-composer {
@@ -1543,11 +1724,22 @@ label {
   justify-content: space-between;
   gap: 1rem;
   align-items: end;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .composer-head strong {
   display: block;
   margin-bottom: 0.2rem;
+}
+
+.composer-head > div,
+.composer-foot > span {
+  min-width: min(24rem, 100%);
+}
+
+.composer-head label {
+  width: min(11rem, 100%);
 }
 
 .composer-foot span {
@@ -1577,6 +1769,14 @@ label {
 
   .conversation-grid {
     grid-template-columns: 1fr;
+  }
+
+  .conversation-column,
+  .conversation-stack,
+  .conversation-transcript,
+  .conversation-rail {
+    min-width: 0;
+    resize: none;
   }
 
   .settings-grid {
@@ -1654,6 +1854,19 @@ label {
   .team-grid {
     flex-direction: column;
     grid-template-columns: 1fr;
+  }
+
+  .allowlist-editor {
+    grid-template-columns: 1fr;
+  }
+
+  .allowlist-chip {
+    grid-template-columns: 1fr auto;
+    border-radius: 8px;
+  }
+
+  .allowlist-chip em {
+    grid-column: 1 / -1;
   }
 
   .table-header {

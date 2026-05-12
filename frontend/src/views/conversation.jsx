@@ -1,5 +1,5 @@
 import React from 'react'
-import { badgeClass, buildExecutionItems, cleanDisplayText, executionKey, firstHttpUrl, stageLabel, summarizeContextCounts } from '../lib/app-utils'
+import { badgeClass, buildExecutionItems, cleanDisplayText, cleanSummaryText, commandIsAllowlisted, commandLooksLikeInstall, commandNameFromItem, executionKey, firstHttpUrl, stageLabel, summarizeContextCounts } from '../lib/app-utils'
 import { EmptyState, Panel } from '../components/primitives'
 import { ActionBar, ActionDialog, ActionMenu, ActionNotice, buildWhySections, useActionRuntime } from './dashboard-actions'
 import { ApprovalsPanel } from './approvals'
@@ -26,6 +26,10 @@ export function ConversationView({
   setContextForm,
   addContextBlock,
   removeContextBlock,
+  llmPlanner,
+  runPlannerStep,
+  setPlannerEnabled,
+  commandAllowlist,
 }) {
   const actionRuntime = useActionRuntime()
   const services = activeTarget?.services || []
@@ -37,7 +41,9 @@ export function ConversationView({
   const actionById = Object.fromEntries(actions.map((item) => [item.id, item]))
   const executionItems = buildExecutionItems(activeTarget)
   const latestMessage = conversation[conversation.length - 1] || null
+  const targetPlanner = llmPlanner?.targets?.find((item) => item.target_id === activeTarget?.id)?.llm_agent || activeTarget?.llm_agent || {}
   const selectedBlockCount = conversationContext.blockIds.length
+  const targetSummary = cleanSummaryText(activeTarget.latest_summary, 'Attach target context and ask the model to reason or queue next steps.')
   const promptPresets = [
     {
       id: 'continue',
@@ -85,7 +91,7 @@ export function ConversationView({
   return (
     <>
       <div className="conversation-grid">
-        <section className="conversation-stack">
+        <section className="conversation-column conversation-stack">
           <Panel title="Conversation Actions" meta={activeTarget.display_name || activeTarget.ip_address} className="wide">
             <ActionBar>
               <button type="button" onClick={() => actionRuntime.showText(
@@ -108,7 +114,7 @@ export function ConversationView({
             <div>
               <span className="eyebrow">Target-linked Assistant</span>
               <h2>{activeTarget.display_name || activeTarget.ip_address}</h2>
-              <p>{cleanDisplayText(activeTarget.latest_summary, 'Attach target context and ask the model to reason or queue next steps.')}</p>
+              <p>{targetSummary}</p>
             </div>
             <div className="hero-meta">
               <span className={badgeClass(activeTarget.phase)}>{activeTarget.phase}</span>
@@ -125,7 +131,7 @@ export function ConversationView({
                       buildWhySections([
                         { label: 'Active target', value: activeTarget.display_name || activeTarget.ip_address },
                         { label: 'Phase', value: activeTarget.phase || 'unknown' },
-                        { label: 'Summary', value: activeTarget.latest_summary || 'No summary recorded.' },
+                        { label: 'Summary', value: cleanSummaryText(activeTarget.latest_summary, 'No summary recorded.') },
                       ]),
                     ),
                   },
@@ -141,6 +147,58 @@ export function ConversationView({
               />
             </div>
           </article>
+
+          <Panel
+            title="LLM Planning Loop"
+            meta={llmPlanner?.enabled ? 'autoplan enabled' : 'manual mode'}
+            actions={(
+              <ActionMenu
+                label="Planner Actions"
+                actions={[
+                  {
+                    label: 'Run planner step',
+                    onSelect: runPlannerStep,
+                    disabled: loading,
+                  },
+                  {
+                    label: llmPlanner?.enabled ? 'Pause global loop' : 'Start global loop',
+                    onSelect: () => setPlannerEnabled(!llmPlanner?.enabled),
+                    disabled: loading,
+                  },
+                  {
+                    label: 'View raw planner state',
+                    onSelect: () => actionRuntime.showJson('LLM planner state', { planner: llmPlanner, targetPlanner }),
+                  },
+                ]}
+              />
+            )}
+          >
+            <div className="planner-status-grid">
+              <article>
+                <strong>Status</strong>
+                <span className={badgeClass(targetPlanner.status || 'idle')}>{targetPlanner.status || 'idle'}</span>
+              </article>
+              <article>
+                <strong>Runs</strong>
+                <span>{targetPlanner.run_count || 0} completed · {targetPlanner.skip_count || 0} skipped</span>
+              </article>
+              <article>
+                <strong>Last success</strong>
+                <span>{targetPlanner.last_success_at || 'not yet'}</span>
+              </article>
+              <article>
+                <strong>Last queued</strong>
+                <span>{targetPlanner.last_queued_action_ids?.length || 0} action(s)</span>
+              </article>
+            </div>
+            {targetPlanner.last_error ? <p className="error-banner">{targetPlanner.last_error}</p> : null}
+            <div className="button-row">
+              <button className="primary" type="button" disabled={loading} onClick={runPlannerStep}>Plan Next Step Now</button>
+              <button type="button" disabled={loading} onClick={() => setPlannerEnabled(!llmPlanner?.enabled)}>
+                {llmPlanner?.enabled ? 'Pause Autoplan' : 'Start Autoplan'}
+              </button>
+            </div>
+          </Panel>
 
           <Panel
             title="Context Matrix"
@@ -291,7 +349,7 @@ export function ConversationView({
           </Panel>
         </section>
 
-        <section className="conversation-transcript panel">
+        <section className="conversation-column conversation-transcript panel">
         <div className="panel-head">
           <h3>Transcript</h3>
           <div className="panel-head-meta">
@@ -346,13 +404,16 @@ export function ConversationView({
                           <div className="approval-stage-row">
                             <span className="stage-chip">{stageLabel(action.stage)}</span>
                             <span className="stage-chip muted">{action.source === 'operator_prompt' ? 'operator requested' : 'playbook queued'}</span>
+                            {commandIsAllowlisted(action, commandAllowlist) ? <span className="stage-chip good">auto-allowed: {commandNameFromItem(action)}</span> : null}
+                            {commandLooksLikeInstall(action) ? <span className="stage-chip danger">install approval required</span> : null}
+                            {action.tool_available === false ? <span className="stage-chip muted">binary not found</span> : null}
                           </div>
                           {action.mindset ? <small className="approval-mindset">{cleanDisplayText(action.mindset, '')}</small> : null}
                           <code>{action.command}</code>
                         </div>
                         <div className="approval-actions">
                           <span className={badgeClass(action.status)}>{action.status}</span>
-                          <button className="primary" type="button" disabled={loading || !action.tool_available || action.status !== 'pending_approval'} onClick={() => decideAction(action.id, 'approve')}>Approve</button>
+                          <button className="primary" type="button" disabled={loading || !['pending_approval', 'blocked'].includes(action.status)} onClick={() => decideAction(action.id, 'approve')}>Approve</button>
                           <button className="deny" type="button" disabled={loading || !['pending_approval', 'blocked'].includes(action.status)} onClick={() => decideAction(action.id, 'deny')}>Deny</button>
                           <button type="button" disabled={loading} onClick={() => removeAction(action.id)}>Remove</button>
                         </div>
@@ -419,9 +480,9 @@ export function ConversationView({
           </form>
         </section>
 
-        <section className="conversation-rail">
-          <ApprovalsPanel approvalQueue={approvalQueue} loading={loading} decideAction={decideAction} removeAction={removeAction} />
-          <JobsPanel activeTarget={activeTarget} selectedExecutionKey={selectedExecutionKey} setSelectedExecutionKey={setSelectedExecutionKey} stopExecution={stopExecution} loading={loading} condensed />
+        <section className="conversation-column conversation-rail">
+          <ApprovalsPanel approvalQueue={approvalQueue} loading={loading} decideAction={decideAction} removeAction={removeAction} commandAllowlist={commandAllowlist} />
+          <JobsPanel activeTarget={activeTarget} selectedExecutionKey={selectedExecutionKey} setSelectedExecutionKey={setSelectedExecutionKey} stopExecution={stopExecution} loading={loading} condensed commandAllowlist={commandAllowlist} />
           <Panel
             title="Target Snapshot"
             meta={activeTarget.ip_address}

@@ -1,15 +1,16 @@
-#!/usr/bin/env bash
-set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT"
-if [ -f .env ]; then
-  set -a
-  source .env
-  set +a
-fi
-source .venv/bin/activate
-HOST="${HTBMC_BIND_HOST:-127.0.0.1}"
-PORT="${HTBMC_PORT:-8000}"
-export PYTHONPATH="$ROOT/backend:${PYTHONPATH:-}"
-echo "[run] http://$HOST:$PORT"
-uvicorn htbmc.app:app --host "$HOST" --port "$PORT" --reload --app-dir backend
+# Legacy Backend Launcher Note
+
+This file used to contain an early backend launcher shell script despite the `.md` extension. The active backend launcher is:
+
+```bash
+./scripts/run_dev.sh
+```
+
+Current behavior:
+
+- activates `.venv`
+- sets `PYTHONPATH` to include `backend/`
+- reads `HTBMC_BIND_HOST` and `HTBMC_PORT`
+- starts `uvicorn htbmc.app:app --app-dir backend`
+
+See [scripts/README.md](./scripts/README.md) for examples and environment overrides.

@@ -181,7 +181,7 @@ export function buildWhyItems(item, extraLines = []) {
     ...extraLines,
     item?.status ? `Current status: ${item.status}.` : '',
     item?.risk ? `Risk posture: ${item.risk}.` : '',
-    item?.tool_available === false ? 'This step is blocked because the required tool is not currently available.' : '',
+    item?.tool_available === false ? 'The command binary is not currently detected; operator approval remains available so the run can surface the exact environment failure when appropriate.' : '',
     item?.command ? 'The proposed command is available in the raw input/output drawer for operator review.' : '',
   ])
   return lines.length ? lines : ['No additional rationale was recorded for this item.']

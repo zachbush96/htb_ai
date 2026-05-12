@@ -1,5 +1,5 @@
-import React from 'react'
-import { cleanDisplayText, formatDateTime } from '../lib/app-utils'
+import React, { useEffect, useState } from 'react'
+import { DEFAULT_COMMAND_ALLOWLIST, cleanDisplayText, formatDateTime, normalizeCommandAllowlist } from '../lib/app-utils'
 import { EmptyState, Panel } from '../components/primitives'
 import { SupportActionMenu, SupportCard, SupportModal, SupportNotice, SupportWhy, useSupportActions } from './support-actions'
 
@@ -20,8 +20,14 @@ function templateWhy(kind) {
   return 'The user prompt template shows how Mission Control expands an operator request into the final LLM input, including target IP and serialized target context.'
 }
 
-export function SettingsView({ apiBase, setApiBase, uiSettings, setUiSettings, runtimeSettings, diagnostics, testSettings, llmPrompts }) {
+export function SettingsView({ apiBase, setApiBase, uiSettings, setUiSettings, runtimeSettings, diagnostics, modelCatalog, refreshModelCatalog, testSettings, llmPrompts, llmPlanner, updateLlmSettings, setPlannerEnabled, loading }) {
   const { notice, modal, closeModal, copyValue, openText, openJson, openUrl } = useSupportActions()
+  const [llmForm, setLlmForm] = useState(() => runtimeSettings?.llm || {})
+  const [commandDraft, setCommandDraft] = useState('')
+
+  useEffect(() => {
+    setLlmForm(runtimeSettings?.llm || {})
+  }, [runtimeSettings?.llm])
 
   function updateSetting(key, value) {
     setUiSettings((current) => ({ ...current, [key]: value }))
@@ -29,6 +35,46 @@ export function SettingsView({ apiBase, setApiBase, uiSettings, setUiSettings, r
 
   const ollamaBase = diagnostics?.ollama?.base_url || runtimeSettings?.ollama_base_url || null
   const promptHistory = llmPrompts?.recent_prompts?.slice().reverse() || []
+  const commandAllowlist = normalizeCommandAllowlist(uiSettings.commandAllowlist || DEFAULT_COMMAND_ALLOWLIST)
+  const discoveredModels = Array.isArray(modelCatalog?.models) ? modelCatalog.models : []
+  const currentModel = llmForm.default_model || 'auto'
+  const modelOptions = [...new Set(['auto', ...discoveredModels, currentModel].filter(Boolean))]
+
+  function updateLlmForm(key, value) {
+    setLlmForm((current) => ({ ...current, [key]: value }))
+  }
+
+  function saveLlmSettings(event) {
+    event.preventDefault()
+    updateLlmSettings({
+      ollama_base_url: llmForm.ollama_base_url || null,
+      ollama_tailscale_host: llmForm.ollama_tailscale_host || null,
+      ollama_timeout_seconds: Number(llmForm.ollama_timeout_seconds || 5),
+      default_model: llmForm.default_model || 'auto',
+      temperature: Number(llmForm.temperature ?? 0.2),
+      num_ctx: Number(llmForm.num_ctx || 8192),
+      autoplan_enabled: Boolean(llmForm.autoplan_enabled),
+      autoplan_interval_seconds: Number(llmForm.autoplan_interval_seconds || 20),
+      autoplan_max_actions_per_turn: Number(llmForm.autoplan_max_actions_per_turn || 4),
+      autoplan_include_timeline: Boolean(llmForm.autoplan_include_timeline),
+      autoplan_include_execution_history: Boolean(llmForm.autoplan_include_execution_history),
+      autoplan_prompt: llmForm.autoplan_prompt || '',
+      system_prompt: llmForm.system_prompt || null,
+    })
+  }
+
+  function addAllowedCommand(event) {
+    event.preventDefault()
+    const next = normalizeCommandAllowlist([...commandAllowlist, commandDraft])
+    if (next.length !== commandAllowlist.length) {
+      updateSetting('commandAllowlist', next)
+    }
+    setCommandDraft('')
+  }
+
+  function removeAllowedCommand(commandName) {
+    updateSetting('commandAllowlist', commandAllowlist.filter((item) => item !== commandName))
+  }
 
   return (
     <div className="settings-grid">
@@ -146,6 +192,50 @@ export function SettingsView({ apiBase, setApiBase, uiSettings, setUiSettings, r
       </Panel>
 
       <Panel
+        title="Command Allowlist"
+        className="wide"
+        actions={(
+          <SupportActionMenu
+            items={[
+              {
+                id: 'copy-command-allowlist',
+                label: 'Copy allowlist',
+                description: 'Copy the current command allowlist as JSON.',
+                onSelect: () => copyValue('Command allowlist', JSON.stringify(commandAllowlist, null, 2)),
+              },
+              {
+                id: 'raw-command-allowlist',
+                label: 'View raw allowlist',
+                description: 'Inspect the persisted backend allowlist and defaults.',
+                onSelect: () => openJson('Command allowlist', { commandAllowlist, defaults: DEFAULT_COMMAND_ALLOWLIST }, {
+                  description: 'These names are stored in backend runtime settings and can auto-run matching non-install commands.',
+                }),
+              },
+            ]}
+          />
+        )}
+      >
+        <form className="allowlist-editor" onSubmit={addAllowedCommand}>
+          <label>
+            Command name
+            <input value={commandDraft} onChange={(event) => setCommandDraft(event.target.value)} placeholder="curl" />
+          </label>
+          <button className="primary" type="submit" disabled={!normalizeCommandAllowlist([commandDraft]).length}>Add Command</button>
+          <button type="button" onClick={() => updateSetting('commandAllowlist', DEFAULT_COMMAND_ALLOWLIST)}>Restore Defaults</button>
+        </form>
+        <div className="allowlist-chip-grid">
+          {commandAllowlist.map((commandName) => (
+            <span className="allowlist-chip" key={commandName}>
+              <span>{commandName}</span>
+              <em>auto-allowed/default</em>
+              <button type="button" aria-label={`Remove ${commandName}`} onClick={() => removeAllowedCommand(commandName)}>Remove</button>
+            </span>
+          ))}
+        </div>
+        <SupportWhy title="Ask why" body="The allowlist is persisted by the backend for routine command names. Matching non-install commands can auto-run, missing binaries still report command-not-found output, and software installation remains approval-gated." />
+      </Panel>
+
+      <Panel
         title="Diagnostics"
         actions={(
           <SupportActionMenu
@@ -189,6 +279,111 @@ export function SettingsView({ apiBase, setApiBase, uiSettings, setUiSettings, r
             ? `Diagnostics are healthy because the backend successfully reached ${ollamaBase || 'the configured model base'} and enumerated ${diagnostics.ollama.models?.length || 0} models.`
             : `Diagnostics are degraded because the backend probe could not complete against ${ollamaBase || 'the configured model base'}. Review the raw payload for the exact probe error.`}
         />
+      </Panel>
+
+      <Panel
+        title="LLM Usage"
+        className="wide"
+        actions={(
+          <SupportActionMenu
+            items={[
+              {
+                id: 'raw-llm-settings',
+                label: 'View raw LLM settings',
+                description: 'Inspect persisted LLM usage and planner configuration.',
+                onSelect: () => openJson('LLM runtime settings', { settings: llmForm, model_catalog: modelCatalog, planner: llmPlanner }, {
+                  description: 'Current settings returned from /api/settings plus planner status from /api/llm/planner.',
+                }),
+              },
+              {
+                id: 'refresh-model-catalog',
+                label: 'Refresh models',
+                description: 'Query the configured OpenAI-compatible /v1/models endpoint.',
+                onSelect: refreshModelCatalog,
+              },
+              {
+                id: 'toggle-planner',
+                label: llmPlanner?.enabled ? 'Pause planner' : 'Start planner',
+                description: 'Toggle the global autonomous planning loop.',
+                onSelect: () => setPlannerEnabled(!llmPlanner?.enabled),
+              },
+            ]}
+          />
+        )}
+      >
+        <form className="settings-form-grid" onSubmit={saveLlmSettings}>
+          <label>
+            Ollama base URL
+            <input value={llmForm.ollama_base_url || ''} onChange={(event) => updateLlmForm('ollama_base_url', event.target.value)} placeholder="http://127.0.0.1:11434" />
+          </label>
+          <label>
+            Tailscale host
+            <input value={llmForm.ollama_tailscale_host || ''} onChange={(event) => updateLlmForm('ollama_tailscale_host', event.target.value)} placeholder="100.102.78.116" />
+          </label>
+          <label>
+            Default model
+            <select value={currentModel} onChange={(event) => updateLlmForm('default_model', event.target.value)}>
+              {modelOptions.map((modelName) => (
+                <option key={modelName} value={modelName}>{modelName === 'auto' ? 'Auto' : modelName}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Timeout seconds
+            <input type="number" min="1" max="180" value={llmForm.ollama_timeout_seconds || 5} onChange={(event) => updateLlmForm('ollama_timeout_seconds', event.target.value)} />
+          </label>
+          <label>
+            Temperature
+            <input type="number" min="0" max="2" step="0.1" value={llmForm.temperature ?? 0.2} onChange={(event) => updateLlmForm('temperature', event.target.value)} />
+          </label>
+          <label>
+            Context window
+            <input type="number" min="1024" max="65536" step="1024" value={llmForm.num_ctx || 8192} onChange={(event) => updateLlmForm('num_ctx', event.target.value)} />
+          </label>
+          <label>
+            Planner interval
+            <input type="number" min="5" max="3600" value={llmForm.autoplan_interval_seconds || 20} onChange={(event) => updateLlmForm('autoplan_interval_seconds', event.target.value)} />
+          </label>
+          <label>
+            Max actions per turn
+            <input type="number" min="1" max="10" value={llmForm.autoplan_max_actions_per_turn || 4} onChange={(event) => updateLlmForm('autoplan_max_actions_per_turn', event.target.value)} />
+          </label>
+          <label className="checkbox-line">
+            <input type="checkbox" checked={Boolean(llmForm.autoplan_enabled)} onChange={(event) => updateLlmForm('autoplan_enabled', event.target.checked)} />
+            Run autonomous planner loop
+          </label>
+          <label className="checkbox-line">
+            <input type="checkbox" checked={Boolean(llmForm.autoplan_include_execution_history)} onChange={(event) => updateLlmForm('autoplan_include_execution_history', event.target.checked)} />
+            Feed previous jobs/actions/results
+          </label>
+          <label className="checkbox-line">
+            <input type="checkbox" checked={Boolean(llmForm.autoplan_include_timeline)} onChange={(event) => updateLlmForm('autoplan_include_timeline', event.target.checked)} />
+            Include recent timeline
+          </label>
+          <label className="full-width">
+            Planner prompt
+            <textarea rows={4} value={llmForm.autoplan_prompt || ''} onChange={(event) => updateLlmForm('autoplan_prompt', event.target.value)} />
+          </label>
+          <label className="full-width">
+            System prompt override
+            <textarea rows={5} value={llmForm.system_prompt || ''} onChange={(event) => updateLlmForm('system_prompt', event.target.value)} placeholder="Leave blank to use the built-in HTB Mission Control system prompt." />
+          </label>
+          <div className="button-row full-width">
+            <button className="primary" type="submit" disabled={loading}>{loading ? 'Saving...' : 'Save LLM Settings'}</button>
+            <button type="button" disabled={loading} onClick={refreshModelCatalog}>Refresh Models</button>
+            <button type="button" disabled={loading} onClick={() => setPlannerEnabled(!llmPlanner?.enabled)}>
+              {llmPlanner?.enabled ? 'Pause Planner' : 'Start Planner'}
+            </button>
+          </div>
+        </form>
+        <dl className="settings-list">
+          <div><dt>Loop</dt><dd>{llmPlanner?.enabled ? 'enabled' : 'paused'}</dd></div>
+          <div><dt>Worker</dt><dd>{llmPlanner?.worker_alive ? 'running' : 'stopped'}</dd></div>
+          <div><dt>Targets</dt><dd>{llmPlanner?.targets?.length || 0}</dd></div>
+          <div><dt>Models</dt><dd>{modelCatalog?.reachable ? `${discoveredModels.length} from /v1/models` : cleanDisplayText(modelCatalog?.error, 'not loaded')}</dd></div>
+          <div><dt>Planner log</dt><dd>{llmPlanner?.planner_log_path || 'not created yet'}</dd></div>
+        </dl>
+        <SupportWhy title="Ask why" body="These settings control which model endpoint Mission Control uses, how much context is sent, and whether the autonomous planner periodically feeds prior jobs, actions, and results back into the LLM to queue fresh approval-gated actions." />
       </Panel>
 
       <Panel

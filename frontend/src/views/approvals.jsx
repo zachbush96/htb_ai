@@ -1,11 +1,13 @@
 import React from 'react'
-import { badgeClass, cleanDisplayText, stageLabel } from '../lib/app-utils'
+import { badgeClass, cleanDisplayText, commandIsAllowlisted, commandLooksLikeInstall, commandNameFromItem, stageLabel } from '../lib/app-utils'
 import { EmptyState, Panel } from '../components/primitives'
 import { buildWhyItems, extractDetectedVersion, extractFirstUrl, openInBrowser, OpsActionMenu, OpsCopyNote, OpsMetaGrid, OpsRawBlock, OpsWhyList, safeSerialize } from './ops-actions'
 
-function ApprovalActions({ item }) {
+function ApprovalActions({ item, commandAllowlist }) {
   const browserUrl = extractFirstUrl(item.command, item.reason, item.summary)
   const detectedVersion = extractDetectedVersion(item.label, item.reason, item.summary, item.command)
+  const allowlisted = commandIsAllowlisted(item, commandAllowlist)
+  const installGated = commandLooksLikeInstall(item)
 
   return (
     <OpsActionMenu
@@ -19,13 +21,17 @@ function ApprovalActions({ item }) {
           renderPanel: () => (
             <>
               <OpsWhyList items={buildWhyItems(item, [
-                item.tool_available ? 'The required tool is available for immediate operator approval.' : '',
+                allowlisted ? `${commandNameFromItem(item)} is on the operator command allowlist for routine execution review.` : '',
+                installGated ? 'Software installation remains approval-gated even when the launcher command is allowlisted.' : '',
+                item.tool_available ? 'The required tool is available for immediate operator approval.' : 'The command binary is not currently detected, but the operator can still approve or deny the action from this queue.',
                 item.status === 'blocked' ? 'This action needs operator attention before it can run.' : '',
               ])} />
               <OpsMetaGrid items={[
                 { label: 'Status', value: item.status || 'unknown' },
                 { label: 'Risk', value: item.risk || 'review' },
                 { label: 'Tool ready', value: item.tool_available ? 'yes' : 'no' },
+                { label: 'Allowlist', value: allowlisted ? 'auto-allowed/default' : 'manual review' },
+                { label: 'Install gate', value: installGated ? 'approval required' : 'not detected' },
               ]} />
             </>
           ),
@@ -78,7 +84,7 @@ function ApprovalActions({ item }) {
   )
 }
 
-export function ApprovalsPanel({ approvalQueue, loading, decideAction, removeAction }) {
+export function ApprovalsPanel({ approvalQueue, loading, decideAction, removeAction, commandAllowlist }) {
   return (
     <Panel title="Pending Approvals" meta={approvalQueue.length}>
       {approvalQueue.length ? (
@@ -91,14 +97,17 @@ export function ApprovalsPanel({ approvalQueue, loading, decideAction, removeAct
                 <div className="approval-stage-row">
                   <span className="stage-chip">{stageLabel(item.stage)}</span>
                   <span className="stage-chip muted">{item.source === 'operator_prompt' ? 'operator requested' : 'playbook queued'}</span>
+                  {commandIsAllowlisted(item, commandAllowlist) ? <span className="stage-chip good">auto-allowed: {commandNameFromItem(item)}</span> : null}
+                  {commandLooksLikeInstall(item) ? <span className="stage-chip danger">install approval required</span> : null}
+                  {item.tool_available === false ? <span className="stage-chip muted">binary not found</span> : null}
                 </div>
                 {item.mindset ? <small className="approval-mindset">{cleanDisplayText(item.mindset, '')}</small> : null}
                 <code>{item.command}</code>
-                <ApprovalActions item={item} />
+                <ApprovalActions item={item} commandAllowlist={commandAllowlist} />
               </div>
               <em className={badgeClass(item.risk)}>{item.risk}</em>
               <div className="approval-actions">
-                <button className="primary" type="button" disabled={loading || !item.tool_available || item.status !== 'pending_approval'} onClick={() => decideAction(item.id, 'approve')}>Approve & Run</button>
+                <button className="primary" type="button" disabled={loading || !['pending_approval', 'blocked'].includes(item.status)} onClick={() => decideAction(item.id, 'approve')}>Approve & Run</button>
                 <button className="deny" type="button" disabled={loading || !['pending_approval', 'blocked'].includes(item.status)} onClick={() => decideAction(item.id, 'deny')}>Deny</button>
                 <button type="button" disabled={loading || item.status === 'running'} onClick={() => removeAction(item.id)}>Remove</button>
               </div>
@@ -106,7 +115,7 @@ export function ApprovalsPanel({ approvalQueue, loading, decideAction, removeAct
           ))}
         </div>
       ) : <EmptyState title="Queue clear" body="No actions are waiting for approval." />}
-      {approvalQueue.length ? <OpsCopyNote>Each queued action now includes local operator tools for rationale review, raw proposal inspection, clipboard copy, and URL handoff when a web target is present.</OpsCopyNote> : null}
+      {approvalQueue.length ? <OpsCopyNote>Allowlisted commands are marked as auto-allowed/default for operator scanning, but queued terminal actions still require approval. Software installation remains approval-gated, and approval controls stay available even when the command binary is missing.</OpsCopyNote> : null}
     </Panel>
   )
 }
