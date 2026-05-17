@@ -1,8 +1,8 @@
-1. Remove past targets from the project completely include from GitHub , and when the app starts, remove past projects too.
+1. Remove past targets from the project completely include from GitHub , and when the app starts, remove past projects too. [.]
 
 2. Create an easier way to launch this from a PwnBox , or disposable linux VM
 
-3. Why does the app.py wihtin the home//root directory seem like a markdown file and not an actual python script? Update the files accordingly.
+3. Why does the app.py wihtin the home//root directory seem like a markdown file and not an actual python script? Update the files accordingly. After more checking, a LOT of the files wtihin the root directory of this project seem incorrect. For example I just check the util.py , and it seems like some sort of LLM skill file. Please address all files like this. Make sure changes do not disrupt the running of the actual project.
 
 4. The app.py (backend/htbmc/app.py) within the backend directory is HUGE and hard to understand completely. Break it up into more digestable and modular components.
 
