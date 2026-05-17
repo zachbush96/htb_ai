@@ -1,4 +1,6 @@
 .env
+.htb-codex.env
+.htb-codex.sh
 .venv/
 __pycache__/
 *.pyc
@@ -6,3 +8,8 @@ node_modules/
 frontend/node_modules/
 frontend/dist/
 *.log
+.DS_Store
+state/.DS_Store
+state/targets/
+state/logs/*.jsonl
+state/settings/runtime.json

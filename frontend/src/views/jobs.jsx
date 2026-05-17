@@ -3,13 +3,37 @@ import { badgeClass, buildExecutionItems, cleanDisplayText, commandIsAllowlisted
 import { EmptyState, Panel } from '../components/primitives'
 import { buildWhyItems, extractArtifactPath, extractDetectedVersion, extractFirstUrl, openInBrowser, OpsActionMenu, OpsCopyNote, OpsMetaGrid, OpsRawBlock, OpsWhyList, safeSerialize } from './ops-actions'
 
+function isLlmExecution(item) {
+  return item?.execution_kind === 'llm'
+}
+
+function llmPromptTranscript(item) {
+  const messages = Array.isArray(item?.request_messages) ? item.request_messages : []
+  if (!messages.length) return 'No prompt transcript recorded.'
+  return messages
+    .map((message, index) => `[${index + 1}] ${String(message?.role || 'user').toUpperCase()}\n${String(message?.content || '')}`)
+    .join('\n\n')
+}
+
+function executionRawInput(item) {
+  if (isLlmExecution(item)) return llmPromptTranscript(item)
+  return item?.command || 'No command recorded.'
+}
+
+function executionRawOutput(item) {
+  if (isLlmExecution(item)) return item?.response_text || item?.live_output_tail || item?.error || 'No response recorded yet.'
+  return item?.live_output_tail || item?.result_excerpt || item?.error || 'No output captured yet.'
+}
+
 function ExecutionActions({ item, condensed = false, commandAllowlist }) {
   const browserUrl = extractFirstUrl(item.command, item.result_excerpt, item.live_output_tail, item.error)
   const artifactPath = extractArtifactPath(item)
   const detectedVersion = extractDetectedVersion(item.result_excerpt, item.live_output_tail, item.parse_summary, item.summary)
-  const rawOutput = item.live_output_tail || item.result_excerpt || item.error || 'No output captured yet.'
+  const rawInput = executionRawInput(item)
+  const rawOutput = executionRawOutput(item)
   const allowlisted = commandIsAllowlisted(item, commandAllowlist)
   const installGated = commandLooksLikeInstall(item)
+  const llmExecution = isLlmExecution(item)
 
   return (
     <OpsActionMenu
@@ -46,26 +70,26 @@ function ExecutionActions({ item, condensed = false, commandAllowlist }) {
           description: 'Inspect the raw command, output tail, and execution JSON.',
           renderPanel: () => (
             <>
-              <OpsRawBlock title="Raw Command Input" value={item.command} empty="No command recorded." />
-              <OpsRawBlock title="Raw Output Tail" value={rawOutput} />
+              <OpsRawBlock title={llmExecution ? 'Full Prompt Input' : 'Raw Command Input'} value={rawInput} empty={llmExecution ? 'No prompt recorded.' : 'No command recorded.'} />
+              <OpsRawBlock title={llmExecution ? 'Raw Response Output' : 'Raw Output Tail'} value={rawOutput} />
               <OpsRawBlock title="Raw Execution JSON" value={safeSerialize(item)} />
             </>
           ),
         },
         {
-          id: 'copy-command',
+          id: 'copy-input',
           type: 'copy',
-          label: 'Copy command',
-          value: item.command || '',
-          disabled: !item.command,
-          description: 'Execution command copied to the clipboard.',
+          label: llmExecution ? 'Copy prompt' : 'Copy command',
+          value: rawInput,
+          disabled: !rawInput,
+          description: llmExecution ? 'Recorded prompt copied to the clipboard.' : 'Execution command copied to the clipboard.',
         },
         {
           id: 'copy-output',
           type: 'copy',
-          label: 'Copy raw output',
+          label: llmExecution ? 'Copy response' : 'Copy raw output',
           value: rawOutput,
-          description: 'Execution output copied to the clipboard.',
+          description: llmExecution ? 'Recorded model response copied to the clipboard.' : 'Execution output copied to the clipboard.',
         },
         {
           id: 'copy-artifact-path',
@@ -118,6 +142,26 @@ export function JobsPanel({ activeTarget, selectedExecutionKey, setSelectedExecu
   const executionItems = buildExecutionItems(activeTarget)
   const selectedItem = executionItems.find((item) => executionKey(item) === selectedExecutionKey) || executionItems[0] || null
   const activeCount = executionItems.filter(executionIsActive).length
+  const llmExecution = isLlmExecution(selectedItem)
+  const metadataItems = !selectedItem ? [] : (
+    llmExecution
+      ? [
+        { label: 'Type', value: selectedItem.kind || 'operator' },
+        { label: 'Model', value: selectedItem.model || 'local-heuristic' },
+        { label: 'Started', value: formatDateTime(selectedItem.started_at || selectedItem.created_at) },
+        { label: 'Last output', value: selectedItem.last_output_at ? formatRelativeTime(selectedItem.last_output_at) : 'none yet' },
+        { label: 'Captured', value: formatBytes(selectedItem.output_bytes) },
+        { label: 'Prompt ID', value: selectedItem.prompt_id || selectedItem.id || 'n/a' },
+      ]
+      : [
+        { label: 'PID', value: selectedItem.pid || 'n/a' },
+        { label: 'Started', value: formatDateTime(selectedItem.started_at || selectedItem.created_at) },
+        { label: 'Last output', value: selectedItem.last_output_at ? formatRelativeTime(selectedItem.last_output_at) : 'none yet' },
+        { label: 'Captured', value: formatBytes(selectedItem.output_bytes) },
+        { label: 'Artifact', value: cleanDisplayText(selectedItem.output_path, 'not written yet') },
+        { label: 'Exit', value: executionExitLabel(selectedItem) },
+      ]
+  )
 
   return (
     <Panel title={condensed ? 'Live Execution' : 'Jobs'} meta={`${activeCount} active`}>
@@ -155,28 +199,48 @@ export function JobsPanel({ activeTarget, selectedExecutionKey, setSelectedExecu
                 </div>
                 <div className="execution-actions">
                   <span className={badgeClass(selectedItem.status)}>{selectedItem.status}</span>
-                  <button
-                    className="danger-button"
-                    type="button"
-                    disabled={loading || !executionIsActive(selectedItem)}
-                    onClick={() => stopExecution(selectedItem)}
-                  >
-                    Stop
-                  </button>
+                  {!llmExecution ? (
+                    <button
+                      className="danger-button"
+                      type="button"
+                      disabled={loading || !executionIsActive(selectedItem)}
+                      onClick={() => stopExecution(selectedItem)}
+                    >
+                      Stop
+                    </button>
+                  ) : null}
                 </div>
               </div>
 
               <dl className="execution-metadata">
-                <div><dt>PID</dt><dd>{selectedItem.pid || 'n/a'}</dd></div>
-                <div><dt>Started</dt><dd>{formatDateTime(selectedItem.started_at || selectedItem.created_at)}</dd></div>
-                <div><dt>Last output</dt><dd>{selectedItem.last_output_at ? formatRelativeTime(selectedItem.last_output_at) : 'none yet'}</dd></div>
-                <div><dt>Captured</dt><dd>{formatBytes(selectedItem.output_bytes)}</dd></div>
-                <div><dt>Artifact</dt><dd>{cleanDisplayText(selectedItem.output_path, 'not written yet')}</dd></div>
-                <div><dt>Exit</dt><dd>{executionExitLabel(selectedItem)}</dd></div>
+                {metadataItems.map((item) => (
+                  <div key={item.label}><dt>{item.label}</dt><dd>{item.value}</dd></div>
+                ))}
               </dl>
 
-              <code className="command-line">{selectedItem.command || 'No command recorded.'}</code>
-              <pre className="console-tail">{selectedItem.live_output_tail || selectedItem.result_excerpt || selectedItem.error || 'No output captured yet.'}</pre>
+              {llmExecution ? (
+                <>
+                  {selectedItem.operator_prompt ? (
+                    <section className="execution-section">
+                      <h5>Operator Request</h5>
+                      <code className="command-line">{selectedItem.operator_prompt}</code>
+                    </section>
+                  ) : null}
+                  <section className="execution-section">
+                    <h5>Full Prompt Transcript</h5>
+                    <pre className="console-tail compact">{llmPromptTranscript(selectedItem)}</pre>
+                  </section>
+                  <section className="execution-section">
+                    <h5>Model Response</h5>
+                    <pre className="console-tail">{executionRawOutput(selectedItem)}</pre>
+                  </section>
+                </>
+              ) : (
+                <>
+                  <code className="command-line">{selectedItem.command || 'No command recorded.'}</code>
+                  <pre className="console-tail">{executionRawOutput(selectedItem)}</pre>
+                </>
+              )}
               <ExecutionActions item={selectedItem} condensed={condensed} commandAllowlist={commandAllowlist} />
 
               {!condensed ? (

@@ -544,6 +544,7 @@ def _normalize_target(target: dict[str, Any]) -> dict[str, Any]:
         "observations": [],
         "context_blocks": [],
         "conversation": [],
+        "llm_calls": [],
         "credentials": [],
         "sessions": [],
         "artifacts": [],
@@ -633,6 +634,35 @@ def _normalize_target(target: dict[str, Any]) -> dict[str, Any]:
                 job["error"] = job.get("error") or "Execution runtime was lost before results were preserved."
                 job["summary"] = job.get("summary") or "Recovered a stale execution record without parsed services."
             changed = True
+    for llm_call in target.get("llm_calls", []):
+        response_text = str(llm_call.get("response_text") or llm_call.get("live_output_tail") or "")
+        for key, value in {
+            "kind": "operator",
+            "status": "completed",
+            "title": "LLM request",
+            "detail": "",
+            "model": None,
+            "request_messages": [],
+            "operator_prompt": None,
+            "response_text": response_text,
+            "live_output_tail": response_text,
+            "output_bytes": len(response_text.encode("utf-8")),
+            "last_output_at": llm_call.get("finished_at") or llm_call.get("updated_at"),
+            "prompt_id": llm_call.get("id"),
+            "message_id": None,
+            "queued_action_ids": [],
+            "attached_context": {},
+            "model_error": None,
+            "summary": None,
+            "result_excerpt": response_text[:1200],
+            "error": None,
+            "pid": None,
+            "stop_requested_at": None,
+            "termination_reason": None,
+        }.items():
+            if key not in llm_call:
+                llm_call[key] = value
+                changed = True
     if _migrate_action_metadata(target):
         changed = True
     if target.get("services"):
@@ -686,6 +716,11 @@ def _normalize_target(target: dict[str, Any]) -> dict[str, Any]:
     if retrofit_changed:
         _rebuild_attack_state(target)
         changed = True
+    if not _job_is_active(target) and not _action_is_active(target):
+        resting_phase = _resting_target_phase(target)
+        if target.get("phase") != resting_phase and target.get("phase") not in {"initial_enumeration"}:
+            target["phase"] = resting_phase
+            changed = True
     if not _job_is_active(target) and target.get("status") == "enumerating":
         target["status"] = "ready" if target.get("phase") != "enumeration_failed" else "error"
         changed = True
@@ -2284,6 +2319,7 @@ def _new_target(ip_address: str, label: str | None) -> dict[str, Any]:
         "autonomy": _default_autonomy_state(),
         "context_blocks": [],
         "conversation": [],
+        "llm_calls": [],
         "llm_agent": _default_llm_agent_state(),
         "recommendations": _default_recommendations(ip_address),
         "jobs": [],
@@ -2409,7 +2445,7 @@ def _build_findings(services: list[dict[str, Any]], observations: list[dict[str,
 def _compose_summary(target: dict[str, Any]) -> str:
     services = target.get("services", [])
     completed_actions = [item for item in target.get("agent_actions", []) if item["status"] == "completed"]
-    pending_actions = [item for item in target.get("agent_actions", []) if item["status"] in {"pending_approval", "blocked"}]
+    pending_actions = _pending_approval_actions(target)
     observations = target.get("observations", [])
     credentials = target.get("credentials", [])
     sessions = target.get("sessions", [])
@@ -2432,6 +2468,24 @@ def _compose_summary(target: dict[str, Any]) -> str:
 
 def _action_signature(action: dict[str, Any]) -> str:
     return f"{action['category']}::{action['command']}"
+
+
+def _pending_approval_actions(target: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in target.get("agent_actions", [])
+        if item.get("status") in {"pending_approval", "blocked"}
+    ]
+
+
+def _resting_target_phase(target: dict[str, Any]) -> str:
+    if _pending_approval_actions(target):
+        return "awaiting_approval"
+    if target.get("services"):
+        return "enumerated"
+    if target.get("phase") == "enumeration_failed":
+        return "enumeration_failed"
+    return "awaiting_enumeration"
 
 
 def _refresh_agent_actions(target: dict[str, Any]) -> None:
@@ -3154,7 +3208,7 @@ def _run_agent_action(target_id: str, action_id: str) -> None:
                         action_item["updated_at"] = _now()
                         action_item["error"] = f"{binary} is not installed"
                         break
-                missing_target["phase"] = "awaiting_approval"
+                missing_target["phase"] = _resting_target_phase(missing_target)
                 missing_target["latest_summary"] = f"Approved action could not run because {binary} is not installed."
                 missing_target["timeline"].append(
                     _timeline_event("action_blocked", "Approved action is blocked by a missing tool.", {"action_id": action_id})
@@ -3215,7 +3269,7 @@ def _run_agent_action(target_id: str, action_id: str) -> None:
                 completed_target["observations"].append(observation)
             _refresh_agent_actions(completed_target)
             completed_target["findings"] = _build_findings(completed_target.get("services", []), completed_target["observations"])
-            completed_target["phase"] = "awaiting_approval"
+            completed_target["phase"] = _resting_target_phase(completed_target)
             if pause_reasons:
                 completed_target.setdefault("autonomy", _default_autonomy_state())
                 completed_target["autonomy"]["paused"] = True
@@ -3263,7 +3317,7 @@ def _run_agent_action(target_id: str, action_id: str) -> None:
                     action_item["parse_summary"] = "Approved action was stopped by the operator." if stopped else "Command timed out."
                     action_item["error"] = None if stopped else "Command timed out"
                     break
-            timeout_target["phase"] = "awaiting_approval"
+            timeout_target["phase"] = _resting_target_phase(timeout_target)
             timeout_target["latest_summary"] = "Approved action was stopped by the operator." if stopped else "An approved action timed out."
             timeout_target["timeline"].append(
                 _timeline_event("action_stopped" if stopped else "action_failed", "Approved action was stopped by the operator." if stopped else "Approved action timed out.", {"action_id": action_id})
@@ -3282,7 +3336,7 @@ def _run_agent_action(target_id: str, action_id: str) -> None:
                     action_item["updated_at"] = _now()
                     action_item["error"] = str(exc)
                     break
-            error_target["phase"] = "awaiting_approval"
+            error_target["phase"] = _resting_target_phase(error_target)
             error_target["latest_summary"] = f"Approved action crashed: {exc}"
             error_target["timeline"].append(
                 _timeline_event("action_failed", "Approved action crashed.", {"action_id": action_id, "error": str(exc)})
@@ -3333,7 +3387,7 @@ def _deny_action(target_id: str, action_id: str, note: str | None) -> dict[str, 
         action["denied_at"] = _now()
         action["updated_at"] = _now()
         action["decision_note"] = note
-        target["phase"] = "awaiting_approval"
+        target["phase"] = _resting_target_phase(target)
         target["latest_summary"] = _compose_summary(target)
         target["timeline"].append(
             _timeline_event("action_denied", "User denied an agent action.", {"action_id": action_id, "note": note})
@@ -3398,7 +3452,7 @@ def _stop_action(target_id: str, action_id: str, note: str | None) -> dict[str, 
             action["stop_requested_at"] = _now()
             action["termination_reason"] = "operator_stop_requested"
             action["parse_summary"] = "Approved action was stopped before execution started."
-            target["phase"] = "awaiting_approval"
+            target["phase"] = _resting_target_phase(target)
             target["latest_summary"] = "Approved action was stopped before it started."
             target["timeline"].append(
                 _timeline_event("action_stopped", "Approved action was stopped before execution.", {"action_id": action_id, "note": note})
@@ -3788,6 +3842,77 @@ def _append_conversation_message(
     return message
 
 
+def _llm_request_messages(*messages: dict[str, str]) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    for item in messages:
+        role = str(item.get("role") or "user").strip() or "user"
+        content = str(item.get("content") or "")
+        normalized.append({"role": role, "content": content})
+    return normalized
+
+
+def _append_target_llm_call(
+    target: dict[str, Any],
+    *,
+    call_id: str,
+    kind: str,
+    title: str,
+    detail: str,
+    model: str | None,
+    request_messages: list[dict[str, str]],
+    operator_prompt: str | None = None,
+) -> dict[str, Any]:
+    entry = {
+        "id": call_id,
+        "prompt_id": call_id,
+        "kind": kind,
+        "status": "running",
+        "title": title,
+        "detail": detail,
+        "model": model,
+        "operator_prompt": operator_prompt,
+        "request_messages": request_messages,
+        "response_text": "",
+        "live_output_tail": "",
+        "output_bytes": 0,
+        "last_output_at": None,
+        "created_at": _now(),
+        "started_at": _now(),
+        "updated_at": _now(),
+        "finished_at": None,
+        "message_id": None,
+        "queued_action_ids": [],
+        "attached_context": {},
+        "model_error": None,
+        "summary": None,
+        "result_excerpt": "",
+        "error": None,
+        "pid": None,
+        "stop_requested_at": None,
+        "termination_reason": None,
+    }
+    target.setdefault("llm_calls", []).append(entry)
+    target.setdefault("llm_agent", _default_llm_agent_state())
+    target["llm_agent"]["last_prompt_at"] = entry["started_at"]
+    return entry
+
+
+def _update_target_llm_call(target: dict[str, Any], call_id: str, **updates: Any) -> dict[str, Any] | None:
+    llm_call = next((item for item in target.get("llm_calls", []) if item.get("id") == call_id), None)
+    if llm_call is None:
+        return None
+    llm_call.update(updates)
+    llm_call["updated_at"] = _now()
+    response_text = str(llm_call.get("response_text") or "")
+    llm_call["live_output_tail"] = response_text
+    llm_call["result_excerpt"] = response_text[:1200]
+    llm_call["output_bytes"] = len(response_text.encode("utf-8"))
+    target.setdefault("llm_agent", _default_llm_agent_state())
+    if llm_call.get("status") in {"completed", "failed"}:
+        target["llm_agent"]["last_response_at"] = llm_call.get("finished_at") or llm_call["updated_at"]
+    return llm_call
+
+
 def _record_llm_prompt(
     ip_address: str,
     model: str,
@@ -3797,6 +3922,7 @@ def _record_llm_prompt(
 ) -> dict[str, Any]:
     entry = {
         "id": _new_id("prompt"),
+        "event": "prompt",
         "timestamp_utc": _now(),
         "model": model,
         "ip_address": ip_address,
@@ -3804,6 +3930,29 @@ def _record_llm_prompt(
         "system_prompt": _llm_system_prompt(),
         "user_prompt": _build_llm_user_prompt(ip_address, operator_prompt, target_context),
         "operator_prompt": operator_prompt,
+    }
+    _append_jsonl(_llm_prompts_log_path(), entry)
+    return entry
+
+
+def _record_llm_response(
+    prompt_entry: dict[str, Any],
+    *,
+    response_content: str,
+    queued_action_ids: list[str] | None = None,
+    attached_context: dict[str, Any] | None = None,
+    model_error: str | None = None,
+) -> dict[str, Any]:
+    entry = {
+        **prompt_entry,
+        "event": "response",
+        "timestamp_utc": _now(),
+        "response": {
+            "content": response_content,
+            "queued_action_ids": queued_action_ids or [],
+            "attached_context": attached_context or {},
+            "model_error": model_error,
+        },
     }
     _append_jsonl(_llm_prompts_log_path(), entry)
     return entry
@@ -3831,6 +3980,7 @@ def _build_llm_response(payload: LlmPromptRequest) -> dict[str, Any]:
     model_error = None
     skip_planner_tick = False
     skip_reason = None
+    llm_call_id = prompt_entry["id"]
 
     if active_target is not None:
         def mutate(target: dict[str, Any]) -> None:
@@ -3860,25 +4010,56 @@ def _build_llm_response(payload: LlmPromptRequest) -> dict[str, Any]:
 
         active_target = _with_target_lock(active_target["id"], mutate)
 
+    request_messages: list[dict[str, str]] = []
     if resolved_model and active_target is not None:
         try:
             history = _recent_conversation_messages(active_target)
             if history and history[-1]["role"] == "user" and history[-1]["content"] == payload.prompt:
                 history = history[:-1]
+            request_messages = _llm_request_messages(
+                {"role": "system", "content": _llm_system_prompt()},
+                {"role": "system", "content": f"Current target context:\n{target_context}"},
+                *history,
+                {"role": "user", "content": payload.prompt},
+            )
+            active_target = _with_target_lock(
+                active_target["id"],
+                lambda target: _append_target_llm_call(
+                    target,
+                    call_id=llm_call_id,
+                    kind="operator",
+                    title="Operator LLM request",
+                    detail=payload.prompt[:220],
+                    model=resolved_model or "local-heuristic",
+                    request_messages=request_messages,
+                    operator_prompt=payload.prompt,
+                ),
+            )
             with _PlannerLlmPermit(active_target.get("id")):
-                response = _call_ollama_chat(
-                    resolved_model,
-                    [
-                        {"role": "system", "content": _llm_system_prompt()},
-                        {"role": "system", "content": f"Current target context:\n{target_context}"},
-                        *history,
-                        {"role": "user", "content": payload.prompt},
-                    ],
-                )
+                response = _call_ollama_chat(resolved_model, request_messages)
             assistant_content = response["content"] or ""
             resolved_model = response["model"] or resolved_model
         except Exception as exc:  # noqa: BLE001
             model_error = str(exc)
+    elif active_target is not None:
+        request_messages = _llm_request_messages(
+            {"role": "system", "content": _llm_system_prompt()},
+            {"role": "system", "content": f"Current target context:\n{target_context}"},
+            {"role": "user", "content": payload.prompt},
+        )
+        active_target = _with_target_lock(
+            active_target["id"],
+            lambda target: _append_target_llm_call(
+                target,
+                call_id=llm_call_id,
+                kind="operator",
+                title="Operator LLM request",
+                detail=payload.prompt[:220],
+                model=resolved_model or "local-heuristic",
+                request_messages=request_messages,
+                operator_prompt=payload.prompt,
+            ),
+        )
 
     if not assistant_content:
         assistant_content = _assistant_fallback_response(active_target, payload.prompt, context_counts, queued_actions, model_error)
@@ -3897,6 +4078,26 @@ def _build_llm_response(payload: LlmPromptRequest) -> dict[str, Any]:
                 },
                 queued_action_ids=[item["id"] for item in queued_actions],
             )
+            _update_target_llm_call(
+                target,
+                llm_call_id,
+                status="completed",
+                finished_at=_now(),
+                last_output_at=_now(),
+                model=resolved_model or "local-heuristic",
+                response_text=assistant_content,
+                message_id=assistant_message["id"] if assistant_message else None,
+                queued_action_ids=[item["id"] for item in queued_actions],
+                attached_context=context_counts,
+                model_error=model_error,
+                error=model_error,
+                termination_reason="model_error_fallback" if model_error else None,
+                summary=(
+                    "Model call failed and a local heuristic fallback generated the response shown below."
+                    if model_error
+                    else "Recorded the full prompt transcript and model response for this assistant turn."
+                ),
+            )
             target["latest_summary"] = _compose_summary(target)
             target["timeline"].append(
                 _timeline_event(
@@ -3907,6 +4108,13 @@ def _build_llm_response(payload: LlmPromptRequest) -> dict[str, Any]:
             )
 
         active_target = _with_target_lock(active_target["id"], append_reply)
+        _record_llm_response(
+            prompt_entry,
+            response_content=assistant_content,
+            queued_action_ids=[item["id"] for item in queued_actions],
+            attached_context=context_counts,
+            model_error=model_error,
+        )
         _dispatch_next_approved_action(active_target["id"])
 
     recommendations = active_target.get("recommendations", []) if active_target is not None else _generic_prompt_recommendations(ip_address)
@@ -3940,7 +4148,9 @@ def _recent_llm_prompts(limit: int = 20) -> list[dict[str, Any]]:
     if not log_path.exists():
         return []
     lines = log_path.read_text(encoding="utf-8").splitlines()
-    return [json.loads(line) for line in lines[-max(1, min(limit, 100)):]]
+    entries = [json.loads(line) for line in lines]
+    prompts = [item for item in entries if item.get("event", "prompt") == "prompt"]
+    return prompts[-max(1, min(limit, 100)):]
 
 
 def _llm_prompts_payload(limit: int = 20) -> dict[str, Any]:
@@ -4147,20 +4357,33 @@ def _planner_tick_target(target_id: str) -> None:
         _planner_log("planner_noop", "Planner found no policy-eligible actions.", {"target_id": target_id})
         return
     model, _ = _resolve_llm_model("auto")
+    prompt_id = _new_id("prompt")
+    planner_request_messages = _llm_request_messages(
+        {"role": "system", "content": _llm_system_prompt()},
+        {"role": "user", "content": _planner_prompt(target, context_blob, candidates[:8])},
+    )
+    _with_target_lock(
+        target_id,
+        lambda locked_target: _append_target_llm_call(
+            locked_target,
+            call_id=prompt_id,
+            kind="planner",
+            title="Planner LLM decision",
+            detail="Autonomy evaluated the current target context and ranked next-step actions.",
+            model=model or "local-heuristic",
+            request_messages=planner_request_messages,
+        ),
+    )
     try:
         queued_actions: list[dict[str, Any]] = []
         selected_labels: list[str] = []
         rejected_labels: list[str] = []
         hypothesis = "Local priority sort selected the next smallest useful steps."
+        model_error = None
+        raw_content = ""
         if model:
             with _PlannerLlmPermit(target_id):
-                response = _call_ollama_chat(
-                    model,
-                    [
-                        {"role": "system", "content": _llm_system_prompt()},
-                        {"role": "user", "content": _planner_prompt(target, context_blob, candidates[:8])},
-                    ],
-                )
+                response = _call_ollama_chat(model, planner_request_messages)
             raw_content = response.get("content", "").strip()
             hypothesis_match = re.search(r'"hypothesis"\s*:\s*"([^"]+)"', raw_content)
             if hypothesis_match:
@@ -4185,6 +4408,24 @@ def _planner_tick_target(target_id: str) -> None:
             locked_target.setdefault("autonomy", _default_autonomy_state())
             locked_target["autonomy"]["last_decision_at"] = _now()
             locked_target["autonomy"]["last_selected_path_id"] = (locked_target.get("best_path") or {}).get("id")
+            _update_target_llm_call(
+                locked_target,
+                prompt_id,
+                status="completed",
+                finished_at=_now(),
+                last_output_at=_now(),
+                model=model or "local-heuristic",
+                response_text=raw_content or hypothesis,
+                queued_action_ids=[item.get("id") for item in queued_actions],
+                attached_context={
+                    "candidate_count": len(candidates),
+                    "selected_count": len(selected_candidates),
+                },
+                model_error=model_error,
+                error=model_error,
+                termination_reason="model_error_fallback" if model_error else None,
+                summary="Recorded the planner prompt and response so the Jobs pane can replay autonomy decisions.",
+            )
             _append_decision_journal(
                 locked_target,
                 "Autonomy decision",
@@ -4214,13 +4455,33 @@ def _planner_tick_target(target_id: str) -> None:
                 "Planner queued actions.",
                 {"count": len(queued_actions), "action_ids": [a.get("id") for a in queued_actions]},
             )
-            _planner_log("planner_actions_queued", "Planner queued actions.", {"target_id": target_id, "action_ids": [a.get("id") for a in queued_actions]})
+            _planner_log(
+                "planner_actions_queued",
+                "Planner queued actions.",
+                {"target_id": target_id, "prompt_id": prompt_id, "model": model, "action_ids": [a.get("id") for a in queued_actions]},
+            )
         else:
             _log_activity(target_id, "planner_noop", "Planner found no new actions.", {})
-            _planner_log("planner_noop", "Planner found no new actions.", {"target_id": target_id})
+            _planner_log("planner_noop", "Planner found no new actions.", {"target_id": target_id, "prompt_id": prompt_id, "model": model})
     except Exception as exc:
+        _with_target_lock(
+            target_id,
+            lambda locked_target: _update_target_llm_call(
+                locked_target,
+                prompt_id,
+                status="failed",
+                finished_at=_now(),
+                last_output_at=_now(),
+                model=model or "local-heuristic",
+                response_text="",
+                model_error=str(exc),
+                error=str(exc),
+                termination_reason="planner_llm_error",
+                summary="Planner LLM call failed before a usable response was recorded.",
+            ),
+        )
         _log_activity(target_id, "planner_error", "Planner tick failed.", {"error": str(exc)})
-        _planner_log("planner_error", "Planner tick failed.", {"target_id": target_id, "error": str(exc)})
+        _planner_log("planner_error", "Planner tick failed.", {"target_id": target_id, "prompt_id": prompt_id, "model": model, "error": str(exc)})
 
 
 def _planner_loop() -> None:

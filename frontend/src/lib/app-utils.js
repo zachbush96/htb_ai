@@ -237,7 +237,14 @@ export function buildExecutionItems(activeTarget) {
       title: action.label || 'Approved action',
       detail: action.reason || 'Approved command execution',
     }))
-  return [...jobs, ...actions].sort((left, right) => {
+  const llmCalls = (activeTarget?.llm_calls || []).map((call) => ({
+    ...call,
+    execution_kind: 'llm',
+    category_label: call.kind === 'planner' ? 'Planner LLM' : 'LLM',
+    title: call.title || (call.kind === 'planner' ? 'Planner LLM decision' : 'Operator LLM request'),
+    detail: call.detail || call.operator_prompt || 'Recorded prompt and response',
+  }))
+  return [...jobs, ...actions, ...llmCalls].sort((left, right) => {
     const rightTime = right.started_at || right.updated_at || right.created_at || ''
     const leftTime = left.started_at || left.updated_at || left.created_at || ''
     return rightTime.localeCompare(leftTime)
@@ -254,6 +261,12 @@ export function executionKey(item) {
 
 export function executionStatusCopy(item) {
   if (!item) return 'No execution selected.'
+  if (item.execution_kind === 'llm') {
+    if (item.status === 'running') return 'Waiting for the model response.'
+    if (item.status === 'completed' && item.model_error) return 'Model call failed and a local fallback response was recorded instead.'
+    if (item.status === 'completed') return 'Full prompt and response were recorded for troubleshooting.'
+    if (item.status === 'failed') return 'LLM request failed before a usable response was recorded.'
+  }
   if (item.status === 'queued') return 'Queued and waiting for the worker thread.'
   if (item.status === 'approved') return 'Approved and about to start.'
   if (item.status === 'running') {

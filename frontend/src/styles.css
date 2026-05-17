@@ -652,6 +652,24 @@ label {
   word-break: break-word;
 }
 
+.console-tail.compact {
+  min-height: 10rem;
+  max-height: 20rem;
+}
+
+.execution-section {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.execution-section h5 {
+  margin: 0;
+  color: #dbeaf0;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
 .execution-notes p {
   margin: 0;
 }

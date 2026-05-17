@@ -334,7 +334,7 @@ function App() {
     setLoading(true)
     setError('')
     try {
-      await request('/api/llm/interact', {
+      const payload = await request('/api/llm/interact', {
         method: 'POST',
         body: JSON.stringify({
           target_id: activeTargetId,
@@ -349,6 +349,9 @@ function App() {
           include_timeline: conversationContext.includeTimeline,
         }),
       })
+      if (payload?.prompt_id) {
+        setSelectedExecutionKey(`llm:${payload.prompt_id}`)
+      }
       setPromptDraft('')
       await refreshEverything(activeTargetId)
       setActiveView('conversation')

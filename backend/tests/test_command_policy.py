@@ -68,6 +68,15 @@ class CommandPolicyTests(unittest.TestCase):
             ],
         }
 
+    def _persist_target(self, target: dict) -> None:
+        target.setdefault("label", "demo")
+        target.setdefault("status", "ready")
+        target.setdefault("phase", "awaiting_enumeration")
+        target.setdefault("created_at", self.app._now())
+        target.setdefault("updated_at", self.app._now())
+        target.setdefault("latest_summary", "Target created.")
+        self.app._write_json(Path(self.tmpdir.name) / "targets" / target["id"] / "target.json", target)
+
     def test_null_persisted_allowlist_falls_back_to_safe_defaults(self) -> None:
         runtime_path = Path(self.tmpdir.name) / "settings" / "runtime.json"
         runtime_path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,6 +205,82 @@ class CommandPolicyTests(unittest.TestCase):
         with self.assertRaises(Exception):
             self.app._shell_command_for_session(target, payload)
 
+    def test_llm_interaction_persists_prompt_and_response_in_target_jobs_history(self) -> None:
+        target = self.app._new_target("192.168.1.171", "Metasploitable")
+
+        with patch.object(self.app, "_resolve_llm_model", return_value=("mock-model", {"reachable": True})), patch.object(
+            self.app,
+            "_call_ollama_chat",
+            return_value={"model": "mock-model", "content": "Model reply for troubleshooting."},
+        ), patch.object(self.app, "_dispatch_next_approved_action", return_value=False):
+            result = self.app._build_llm_response(
+                self.app.LlmPromptRequest(
+                    target_id=target["id"],
+                    ip_address=target["ip_address"],
+                    prompt="Summarize the target and propose the next step.",
+                    model="auto",
+                )
+            )
+
+        saved = self.app._load_target(target["id"])
+        self.assertEqual(result["prompt_id"], saved["llm_calls"][0]["prompt_id"])
+        self.assertEqual(saved["llm_calls"][0]["kind"], "operator")
+        self.assertEqual(saved["llm_calls"][0]["status"], "completed")
+        self.assertEqual(saved["llm_calls"][0]["model"], "mock-model")
+        self.assertEqual(saved["llm_calls"][0]["operator_prompt"], "Summarize the target and propose the next step.")
+        self.assertEqual(saved["llm_calls"][0]["response_text"], "Model reply for troubleshooting.")
+        self.assertTrue(saved["llm_calls"][0]["request_messages"])
+        self.assertEqual(saved["llm_calls"][0]["request_messages"][-1]["role"], "user")
+        self.assertEqual(saved["llm_calls"][0]["request_messages"][-1]["content"], "Summarize the target and propose the next step.")
+
+        prompt_log = self.app._llm_prompts_log_path().read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(prompt_log), 2)
+        self.assertEqual(self.app.json.loads(prompt_log[0])["event"], "prompt")
+        self.assertEqual(self.app.json.loads(prompt_log[1])["event"], "response")
+
+    def test_planner_tick_persists_llm_prompt_and_response_in_target_history(self) -> None:
+        target = self.app._new_target("192.168.1.171", "Metasploitable")
+        target["services"] = [{"port": 80, "protocol": "tcp", "service": "http", "detail": "Apache"}]
+        self.app._save_target(target)
+
+        planner_action = {
+            "label": "Validate landing page",
+            "risk": "safe",
+            "approval_required": True,
+            "reason": "Inspect the only discovered HTTP surface first.",
+            "command": "curl -iskL http://192.168.1.171",
+            "parser": "http_response",
+            "category": "planner_generated",
+            "stage": "recon",
+            "priority": 60,
+            "mindset": "Confirm the web surface before deeper enumeration.",
+            "source": "planner_runtime",
+        }
+
+        with patch.object(self.app, "_planner_candidate_templates", return_value=[planner_action]), patch.object(
+            self.app,
+            "_context_snapshot",
+            return_value=("planner context", {"services": 1}, []),
+        ), patch.object(self.app, "_resolve_llm_model", return_value=("mock-model", {"reachable": True})), patch.object(
+            self.app,
+            "_call_ollama_chat",
+            return_value={
+                "model": "mock-model",
+                "content": '{"hypothesis":"HTTP is the smallest useful surface.","selected_labels":["Validate landing page"],"rejected_labels":[]}',
+            },
+        ):
+            self.app._planner_tick_target(target["id"])
+
+        saved = self.app._load_target(target["id"])
+        self.assertEqual(len(saved["llm_calls"]), 1)
+        self.assertEqual(saved["llm_calls"][0]["kind"], "planner")
+        self.assertEqual(saved["llm_calls"][0]["status"], "completed")
+        self.assertEqual(saved["llm_calls"][0]["model"], "mock-model")
+        self.assertIn("HTTP is the smallest useful surface.", saved["llm_calls"][0]["response_text"])
+        self.assertEqual(saved["llm_calls"][0]["request_messages"][0]["role"], "system")
+        self.assertEqual(saved["llm_calls"][0]["request_messages"][1]["role"], "user")
+        self.assertTrue(saved["llm_calls"][0]["queued_action_ids"])
+
     def test_normalize_target_adds_attack_graph_and_autonomy_defaults(self) -> None:
         target = self._target_with_actions([])
         target["label"] = "demo"
@@ -299,6 +384,62 @@ class CommandPolicyTests(unittest.TestCase):
         self.assertTrue(any(item["label"] == "msfadmin:msfadmin" for item in normalized["credentials"]))
         self.assertTrue(normalized["sessions"])
         self.assertEqual(normalized["objectives"]["current_phase"], "post-access")
+
+    def test_resting_phase_only_uses_awaiting_approval_when_pending_actions_exist(self) -> None:
+        target = self._target_with_actions([])
+        target["services"] = [{"port": 80, "protocol": "tcp", "service": "http", "detail": "Apache"}]
+
+        self.assertEqual(self.app._resting_target_phase(target), "enumerated")
+
+        target["agent_actions"] = self._target_with_actions(["curl -iskL http://192.168.1.171"])["agent_actions"]
+        self.assertEqual(self.app._resting_target_phase(target), "awaiting_approval")
+
+    def test_normalize_target_repairs_stale_awaiting_approval_without_pending_actions(self) -> None:
+        target = self._target_with_actions([])
+        target["services"] = [{"port": 80, "protocol": "tcp", "service": "http", "detail": "Apache"}]
+        target["phase"] = "awaiting_approval"
+        self._persist_target(target)
+
+        with patch.object(self.app, "_action_catalog", return_value=[]), patch.object(
+            self.app, "_attack_engine_action_templates", return_value=[]
+        ), patch.object(self.app, "_auto_approve_allowlisted_actions", return_value=False):
+            normalized = self.app._load_target("target_test")
+
+        self.assertEqual(normalized["phase"], "enumerated")
+
+    def test_denying_last_pending_action_returns_phase_to_enumerated(self) -> None:
+        target = self._target_with_actions(["curl -iskL http://192.168.1.171"])
+        target["services"] = [{"port": 80, "protocol": "tcp", "service": "http", "detail": "Apache"}]
+        target["phase"] = "awaiting_approval"
+        self._persist_target(target)
+
+        with patch.object(self.app, "_action_catalog", return_value=[]), patch.object(
+            self.app, "_attack_engine_action_templates", return_value=[]
+        ), patch.object(self.app, "_auto_approve_allowlisted_actions", return_value=False):
+            saved = self.app._deny_action("target_test", "act_0", None)
+
+        self.assertEqual(saved["phase"], "enumerated")
+        self.assertEqual(saved["agent_actions"][0]["status"], "denied")
+
+    def test_denying_action_keeps_awaiting_approval_when_other_pending_actions_exist(self) -> None:
+        target = self._target_with_actions(
+            [
+                "curl -iskL http://192.168.1.171",
+                "nmap -Pn -p 80 --script http-title 192.168.1.171",
+            ]
+        )
+        target["services"] = [{"port": 80, "protocol": "tcp", "service": "http", "detail": "Apache"}]
+        target["phase"] = "awaiting_approval"
+        self._persist_target(target)
+
+        with patch.object(self.app, "_action_catalog", return_value=[]), patch.object(
+            self.app, "_attack_engine_action_templates", return_value=[]
+        ), patch.object(self.app, "_auto_approve_allowlisted_actions", return_value=False):
+            saved = self.app._deny_action("target_test", "act_0", None)
+
+        self.assertEqual(saved["phase"], "awaiting_approval")
+        self.assertEqual(saved["agent_actions"][0]["status"], "denied")
+        self.assertEqual(saved["agent_actions"][1]["status"], "pending_approval")
 
     def test_action_policy_blocks_missing_prerequisites_and_noise_overflow(self) -> None:
         target = self._target_with_actions([])
