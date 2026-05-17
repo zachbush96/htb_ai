@@ -274,6 +274,17 @@ def _ensure_dirs() -> None:
     LLM_PROMPTS_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
+def _clear_past_runs() -> None:
+    for directory in (TARGETS_DIR, STATE_DIR / "projects"):
+        if not directory.exists():
+            continue
+        for item in directory.iterdir():
+            if item.is_dir():
+                shutil.rmtree(item, ignore_errors=True)
+            else:
+                item.unlink(missing_ok=True)
+
+
 def _normalize_command_allowlist(commands: list[str] | None) -> list[str]:
     if not isinstance(commands, list):
         return sorted(DEFAULT_COMMAND_ALLOWLIST)
@@ -4512,6 +4523,7 @@ def _stop_planner_runtime() -> None:
 
 @app.on_event("startup")
 def _app_startup() -> None:
+    _clear_past_runs()
     _apply_runtime_settings(_runtime_settings())
     if _runtime_settings().get("autoplan_enabled"):
         _start_planner_runtime()

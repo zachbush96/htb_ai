@@ -11,5 +11,9 @@ frontend/dist/
 .DS_Store
 state/.DS_Store
 state/targets/
+state/projects/
 state/logs/*.jsonl
 state/settings/runtime.json
+target/
+**/target/
+target*.log
