@@ -55,7 +55,12 @@ class ShellSessionInput(BaseModel):
 
 
 class LlmSettingsInput(BaseModel):
+    llm_provider: str = Field(default="ollama", pattern="^(ollama|openrouter)$")
     ollama_base_url: str | None = Field(default=None, max_length=300)
+    openrouter_api_key: str | None = Field(default=None, max_length=300)
+    openrouter_base_url: str | None = Field(default="https://openrouter.ai/api/v1", max_length=300)
+    openrouter_referer: str | None = Field(default=None, max_length=400)
+    openrouter_title: str | None = Field(default=None, max_length=200)
     ollama_tailscale_host: str | None = Field(default=None, max_length=120)
     ollama_timeout_seconds: float = Field(default=5.0, ge=1, le=180)
     default_model: str = Field(default="auto", max_length=120)

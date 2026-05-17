@@ -129,7 +129,12 @@ DEFAULT_COMMAND_ALLOWLIST = {
     "wget",
 }
 DEFAULT_LLM_SETTINGS = {
+    "llm_provider": "ollama",
     "ollama_base_url": OLLAMA_BASE_URL or None,
+    "openrouter_api_key": None,
+    "openrouter_base_url": "https://openrouter.ai/api/v1",
+    "openrouter_referer": None,
+    "openrouter_title": None,
     "ollama_tailscale_host": OLLAMA_TAILSCALE_HOST or None,
     "ollama_timeout_seconds": OLLAMA_TIMEOUT_SECONDS,
     "default_model": "llama3.2:3b",
@@ -3595,7 +3600,7 @@ def _recent_conversation_messages(active_target: dict[str, Any] | None, limit: i
 
 
 def _resolve_llm_model(requested_model: str) -> tuple[str | None, dict[str, Any]]:
-    probe = _probe_ollama()
+    probe = _probe_llm_provider()
     default_model = str(_runtime_settings().get("default_model") or "auto").strip()
     normalized = (requested_model or default_model or "auto").strip()
     if normalized and normalized not in {"auto", "local-heuristic"}:
@@ -3605,34 +3610,35 @@ def _resolve_llm_model(requested_model: str) -> tuple[str | None, dict[str, Any]
     return None, probe
 
 
-def _call_ollama_chat(model: str, messages: list[dict[str, str]]) -> dict[str, Any]:
+def _call_llm_chat(model: str, messages: list[dict[str, str]]) -> dict[str, Any]:
+    runtime = _runtime_settings()
+    provider = str(runtime.get("llm_provider") or "ollama").strip().lower()
+    if provider == "openrouter":
+        base_url = _resolved_llm_base_url()
+        api_key = str(runtime.get("openrouter_api_key") or "").strip()
+        if not base_url or not api_key:
+            raise RuntimeError("OpenRouter is not configured")
+        body = json.dumps({"model": model, "messages": messages, "temperature": runtime.get("temperature", DEFAULT_LLM_SETTINGS["temperature"])}).encode("utf-8")
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+        referer = str(runtime.get("openrouter_referer") or "").strip()
+        title = str(runtime.get("openrouter_title") or "").strip()
+        if referer:
+            headers["HTTP-Referer"] = referer
+        if title:
+            headers["X-Title"] = title
+        request = urllib.request.Request(f"{base_url}/chat/completions", data=body, method="POST", headers=headers)
+        with urllib.request.urlopen(request, timeout=max(OLLAMA_TIMEOUT_SECONDS, 30.0)) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        content = ((payload.get("choices") or [{}])[0].get("message") or {}).get("content", "")
+        return {"model": payload.get("model") or model, "content": str(content).strip()}
     base_url = _resolved_ollama_base_url()
     if not base_url:
         raise RuntimeError("Ollama is not configured")
-    runtime = _runtime_settings()
-    body = json.dumps(
-        {
-            "model": model,
-            "messages": messages,
-            "stream": False,
-            "options": {
-                "temperature": runtime.get("temperature", DEFAULT_LLM_SETTINGS["temperature"]),
-                "num_ctx": runtime.get("num_ctx", DEFAULT_LLM_SETTINGS["num_ctx"]),
-            },
-        }
-    ).encode("utf-8")
-    request = urllib.request.Request(
-        f"{base_url}/api/chat",
-        data=body,
-        method="POST",
-        headers={"Content-Type": "application/json"},
-    )
+    body = json.dumps({"model": model, "messages": messages, "stream": False, "options": {"temperature": runtime.get("temperature", DEFAULT_LLM_SETTINGS["temperature"]), "num_ctx": runtime.get("num_ctx", DEFAULT_LLM_SETTINGS["num_ctx"]),}}).encode("utf-8")
+    request = urllib.request.Request(f"{base_url}/api/chat", data=body, method="POST", headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(request, timeout=max(OLLAMA_TIMEOUT_SECONDS, 30.0)) as response:
         payload = json.loads(response.read().decode("utf-8"))
-    return {
-        "model": payload.get("model") or model,
-        "content": (payload.get("message", {}) or {}).get("content", "").strip(),
-    }
+    return {"model": payload.get("model") or model, "content": (payload.get("message", {}) or {}).get("content", "").strip()}
 
 
 def _best_web_url(active_target: dict[str, Any], operator_prompt: str) -> str | None:
@@ -3974,7 +3980,7 @@ def _build_llm_response(payload: LlmPromptRequest) -> dict[str, Any]:
                 ),
             )
             with _PlannerLlmPermit(active_target.get("id")):
-                response = _call_ollama_chat(resolved_model, request_messages)
+                response = _call_llm_chat(resolved_model, request_messages)
             assistant_content = response["content"] or ""
             resolved_model = response["model"] or resolved_model
         except Exception as exc:  # noqa: BLE001
@@ -4321,7 +4327,7 @@ def _planner_tick_target(target_id: str) -> None:
         raw_content = ""
         if model:
             with _PlannerLlmPermit(target_id):
-                response = _call_ollama_chat(model, planner_request_messages)
+                response = _call_llm_chat(model, planner_request_messages)
             raw_content = response.get("content", "").strip()
             hypothesis_match = re.search(r'"hypothesis"\s*:\s*"([^"]+)"', raw_content)
             if hypothesis_match:
@@ -4470,6 +4476,8 @@ def _settings_payload() -> dict[str, Any]:
         "nmap_path": shutil.which(NMAP_BIN),
         "scan_timeout_seconds": SCAN_TIMEOUT_SECONDS,
         "action_timeout_seconds": ACTION_TIMEOUT_SECONDS,
+        "llm_provider": runtime.get("llm_provider", "ollama"),
+        "llm_base_url": _resolved_llm_base_url(),
         "ollama_base_url": _resolved_ollama_base_url(),
         "ollama_timeout_seconds": OLLAMA_TIMEOUT_SECONDS,
         "llm": runtime,
@@ -4496,6 +4504,35 @@ def _resolved_ollama_base_url() -> str | None:
     return None
 
 
+
+
+def _resolved_llm_base_url() -> str | None:
+    runtime = _runtime_settings()
+    provider = str(runtime.get("llm_provider") or "ollama").strip().lower()
+    if provider == "openrouter":
+        return str(runtime.get("openrouter_base_url") or "https://openrouter.ai/api/v1").strip().rstrip("/")
+    return _resolved_ollama_base_url()
+
+
+def _probe_llm_provider() -> dict[str, Any]:
+    runtime = _runtime_settings()
+    provider = str(runtime.get("llm_provider") or "ollama").strip().lower()
+    if provider == "openrouter":
+        base_url = _resolved_llm_base_url()
+        api_key = str(runtime.get("openrouter_api_key") or "").strip()
+        if not api_key:
+            return {"provider": "openrouter", "configured": False, "reachable": False, "base_url": base_url, "models": [], "error": "Set OpenRouter API key."}
+        request = urllib.request.Request(f"{base_url}/models", method="GET", headers={"Authorization": f"Bearer {api_key}"})
+        try:
+            with urllib.request.urlopen(request, timeout=OLLAMA_TIMEOUT_SECONDS) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            return {"provider": "openrouter", "configured": True, "reachable": False, "base_url": base_url, "models": [], "error": str(exc)}
+        models = [item.get("id", "") for item in payload.get("data", []) if item.get("id")]
+        return {"provider": "openrouter", "configured": True, "reachable": True, "base_url": base_url, "models": models, "error": None}
+    probe = _probe_ollama()
+    probe["provider"] = "ollama"
+    return probe
 def _probe_ollama() -> dict[str, Any]:
     base_url = _resolved_ollama_base_url()
     if not base_url:
@@ -4539,12 +4576,13 @@ def _probe_ollama() -> dict[str, Any]:
 
 
 def _model_catalog_payload() -> dict[str, Any]:
-    probe = _probe_ollama()
+    probe = _probe_llm_provider()
     return {
         "configured": probe["configured"],
         "reachable": probe["reachable"],
         "base_url": probe["base_url"],
-        "endpoint": f"{probe['base_url']}/api/tags" if probe.get("base_url") else None,
+        "provider": probe.get("provider", "ollama"),
+        "endpoint": (f"{probe['base_url']}/models" if probe.get("provider") == "openrouter" else f"{probe['base_url']}/api/tags") if probe.get("base_url") else None,
         "models": probe.get("models", []),
         "error": probe.get("error"),
     }
@@ -4581,7 +4619,7 @@ def root() -> dict[str, str]:
 
 @app.get("/healthz")
 def healthz() -> dict[str, Any]:
-    ollama = _probe_ollama()
+    ollama = _probe_llm_provider()
     return {
         "status": "healthy",
         "state_dir": str(STATE_DIR),
@@ -4593,7 +4631,7 @@ def healthz() -> dict[str, Any]:
 
 @app.get("/api/settings")
 def get_settings() -> dict[str, Any]:
-    return {"ok": True, "settings": _settings_payload(), "ollama": _probe_ollama()}
+    return {"ok": True, "settings": _settings_payload(), "ollama": _probe_llm_provider()}
 
 
 @app.get("/api/settings/models")
@@ -4604,7 +4642,12 @@ def get_settings_models() -> dict[str, Any]:
 @app.post("/api/settings/llm")
 def save_llm_settings(payload: LlmSettingsInput) -> dict[str, Any]:
     next_settings = {
+        "llm_provider": payload.llm_provider,
         "ollama_base_url": payload.ollama_base_url,
+        "openrouter_api_key": payload.openrouter_api_key,
+        "openrouter_base_url": payload.openrouter_base_url,
+        "openrouter_referer": payload.openrouter_referer,
+        "openrouter_title": payload.openrouter_title,
         "ollama_tailscale_host": payload.ollama_tailscale_host,
         "ollama_timeout_seconds": payload.ollama_timeout_seconds,
         "default_model": payload.default_model,
@@ -4633,7 +4676,7 @@ def save_llm_settings(payload: LlmSettingsInput) -> dict[str, Any]:
     return {
         "ok": True,
         "settings": _settings_payload(),
-        "ollama": _probe_ollama(),
+        "ollama": _probe_llm_provider(),
         "model_catalog": _model_catalog_payload(),
         "planner": _planner_status(),
     }
@@ -4972,7 +5015,7 @@ def get_tools_catalog() -> dict[str, Any]:
 
 @app.get("/api/diagnostics/ollama")
 def ollama_diagnostics() -> dict[str, Any]:
-    probe = _probe_ollama()
+    probe = _probe_llm_provider()
     return {"ok": probe["reachable"], "ollama": probe}
 
 
