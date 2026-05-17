@@ -38,6 +38,7 @@ export function SettingsView({ apiBase, setApiBase, uiSettings, setUiSettings, r
   const commandAllowlist = commandAllowlistFromRuntime(runtimeSettings, DEFAULT_COMMAND_ALLOWLIST)
   const discoveredModels = Array.isArray(modelCatalog?.models) ? modelCatalog.models : []
   const currentModel = llmForm.default_model || 'auto'
+  const provider = llmForm.llm_provider || 'ollama'
   const modelOptions = [...new Set(['auto', ...discoveredModels, currentModel].filter(Boolean))]
   const allowlistSource = runtimeSettings?.llm?.command_allowlist ? 'backend runtime' : 'frontend fallback'
 
@@ -48,7 +49,12 @@ export function SettingsView({ apiBase, setApiBase, uiSettings, setUiSettings, r
   function saveLlmSettings(event) {
     event.preventDefault()
     updateLlmSettings({
+      llm_provider: llmForm.llm_provider || "ollama",
       ollama_base_url: llmForm.ollama_base_url || null,
+      openrouter_api_key: llmForm.openrouter_api_key || null,
+      openrouter_base_url: llmForm.openrouter_base_url || "https://openrouter.ai/api/v1",
+      openrouter_referer: llmForm.openrouter_referer || null,
+      openrouter_title: llmForm.openrouter_title || null,
       ollama_tailscale_host: llmForm.ollama_tailscale_host || null,
       ollama_timeout_seconds: Number(llmForm.ollama_timeout_seconds || 5),
       default_model: llmForm.default_model || 'auto',
@@ -74,7 +80,12 @@ export function SettingsView({ apiBase, setApiBase, uiSettings, setUiSettings, r
     const nextAllowlist = normalizeCommandAllowlist(commands)
     setLlmForm((current) => ({ ...current, command_allowlist: nextAllowlist }))
     updateLlmSettings({
+      llm_provider: llmForm.llm_provider || "ollama",
       ollama_base_url: llmForm.ollama_base_url || null,
+      openrouter_api_key: llmForm.openrouter_api_key || null,
+      openrouter_base_url: llmForm.openrouter_base_url || "https://openrouter.ai/api/v1",
+      openrouter_referer: llmForm.openrouter_referer || null,
+      openrouter_title: llmForm.openrouter_title || null,
       ollama_tailscale_host: llmForm.ollama_tailscale_host || null,
       ollama_timeout_seconds: Number(llmForm.ollama_timeout_seconds || 5),
       default_model: llmForm.default_model || 'auto',
@@ -348,6 +359,33 @@ export function SettingsView({ apiBase, setApiBase, uiSettings, setUiSettings, r
         )}
       >
         <form className="settings-form-grid" onSubmit={saveLlmSettings}>
+          <label>
+            LLM provider
+            <select value={provider} onChange={(event) => updateLlmForm('llm_provider', event.target.value)}>
+              <option value="ollama">Ollama</option>
+              <option value="openrouter">OpenRouter</option>
+            </select>
+          </label>
+          {provider === 'openrouter' ? (
+            <>
+              <label>
+                OpenRouter API key
+                <input type="password" value={llmForm.openrouter_api_key || ''} onChange={(event) => updateLlmForm('openrouter_api_key', event.target.value)} placeholder="sk-or-v1-..." />
+              </label>
+              <label>
+                OpenRouter base URL
+                <input value={llmForm.openrouter_base_url || 'https://openrouter.ai/api/v1'} onChange={(event) => updateLlmForm('openrouter_base_url', event.target.value)} placeholder="https://openrouter.ai/api/v1" />
+              </label>
+              <label>
+                App referer
+                <input value={llmForm.openrouter_referer || ''} onChange={(event) => updateLlmForm('openrouter_referer', event.target.value)} placeholder="https://your-app.example" />
+              </label>
+              <label>
+                App title
+                <input value={llmForm.openrouter_title || ''} onChange={(event) => updateLlmForm('openrouter_title', event.target.value)} placeholder="HTB Mission Control" />
+              </label>
+            </>
+          ) : null}
           <label>
             Ollama base URL
             <input value={llmForm.ollama_base_url || ''} onChange={(event) => updateLlmForm('ollama_base_url', event.target.value)} placeholder="http://127.0.0.1:11434" />
